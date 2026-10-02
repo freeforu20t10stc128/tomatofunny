@@ -508,6 +508,14 @@
       style="z-index: 60"
     ></canvas>
 
+    <!-- Nút hỗ trợ mở khóa âm thanh tức thì nếu trình duyệt chặn autoplay nghiêm ngặt -->
+    <button
+      id="soundUnlockHint"
+      class="fixed top-5 left-1/2 -translate-x-1/2 z-[70] hidden items-center gap-2 px-4 py-2 rounded-full bg-white/90 text-rosepink-700 text-xs font-semibold shadow-lg border border-rosepink-300 backdrop-blur-sm transition-all duration-300 hover:scale-105 active:scale-95 animate-bounce"
+    >
+      <span>🔊 Nhấn để bật âm thanh mở rèm mây</span>
+    </button>
+
     <!-- Night Sky Gradient Layer -->
     <div id="nightSkyBg" class="night-sky-bg"></div>
 
@@ -977,6 +985,510 @@
     <script>
       const FIXED_AUTHOR = " Anh 03  TC KTĐN  K64 ~ Lưu ký";
 
+      // ========================================================
+      // HỆ THỐNG ÂM THANH WEB AUDIO TỔNG HỢP NỘI TẠI (KHÔNG CẦN FILE NGOÀI)
+      // TƯƠNG THÍCH 100% GITHUB PAGES VÀ MỌI TRÌNH DUYỆT
+      // ========================================================
+      let audioCtx = null;
+
+      function getAudioContext() {
+        if (!audioCtx) {
+          const AudioContextClass =
+            window.AudioContext || window.webkitAudioContext;
+          if (AudioContextClass) {
+            audioCtx = new AudioContextClass();
+          }
+        }
+        if (audioCtx && audioCtx.state === "suspended") {
+          audioCtx.resume().catch(() => {});
+        }
+        return audioCtx;
+      }
+
+      // Khởi tạo AudioContext ngay khi script được parse để sẵn sàng phát âm thanh
+      try {
+        getAudioContext();
+      } catch (e) {}
+
+      // Biến lưu trữ GainNode chính của âm thanh mở rèm mây để đảm bảo biến mất đồng thời khi mây vừa thoát hết
+      let curtainSoundMasterGain = null;
+      let isCurtainSoundActive = false;
+      let hasCurtainSoundPlayed = false;
+
+      // 1. Tiếng gió mây thoát ra khi rẽ đôi mở đầu - Ngân vang êm ái, phát ngay lập tức khi mở web (chuẩn xác 3.0s)
+      function playCloudCurtainSound() {
+        if (hasCurtainSoundPlayed) return;
+        try {
+          const ctx = getAudioContext();
+          if (!ctx) return;
+
+          // Nếu trình duyệt đang tạm dừng do Autoplay Policy, thử kích hoạt lại
+          if (ctx.state === "suspended") {
+            ctx
+              .resume()
+              .then(() => {
+                if (!hasCurtainSoundPlayed) {
+                  executeCurtainSoundSynthesis(ctx);
+                }
+              })
+              .catch(() => {
+                // Hiển thị nút nhắc bật âm thanh nếu bị trình duyệt chặn hoàn toàn
+                const hintBtn = document.getElementById("soundUnlockHint");
+                if (hintBtn && isCurtainAnimating) {
+                  hintBtn.classList.remove("hidden");
+                  hintBtn.classList.add("flex");
+                }
+              });
+            return;
+          }
+
+          executeCurtainSoundSynthesis(ctx);
+        } catch (e) {}
+      }
+
+      function executeCurtainSoundSynthesis(ctx) {
+        if (hasCurtainSoundPlayed) return;
+        hasCurtainSoundPlayed = true;
+        isCurtainSoundActive = true;
+
+        const hintBtn = document.getElementById("soundUnlockHint");
+        if (hintBtn) hintBtn.classList.add("hidden");
+
+        const now = ctx.currentTime;
+        const DURATION = 3.0; // Khớp chuẩn xác 100% với thời gian rèm mây mở (3 giây)
+
+        // Master Gain điều khiển âm lượng rèm mây (đã giảm 10% từ 0.28 xuống 0.252 để êm dịu hơn)
+        curtainSoundMasterGain = ctx.createGain();
+        curtainSoundMasterGain.gain.setValueAtTime(0.0001, now);
+        curtainSoundMasterGain.gain.linearRampToValueAtTime(0.252, now + 0.35);
+        curtainSoundMasterGain.gain.setValueAtTime(0.252, now + 1.8);
+        curtainSoundMasterGain.gain.exponentialRampToValueAtTime(
+          0.00001,
+          now + DURATION,
+        );
+        curtainSoundMasterGain.connect(ctx.destination);
+
+        // A. Luồng gió mây rẽ sóng lướt đi êm ả (Stereo-like Sweeping Airy Breeze)
+        const bufferSize = Math.floor(ctx.sampleRate * DURATION);
+        const noiseBuffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+        const output = noiseBuffer.getChannelData(0);
+        for (let i = 0; i < bufferSize; i++) {
+          output[i] = Math.random() * 2 - 1;
+        }
+
+        const whiteNoise = ctx.createBufferSource();
+        whiteNoise.buffer = noiseBuffer;
+
+        const filter = ctx.createBiquadFilter();
+        filter.type = "bandpass";
+        filter.Q.value = 0.9;
+        filter.frequency.setValueAtTime(160, now);
+        filter.frequency.exponentialRampToValueAtTime(820, now + 1.4);
+        filter.frequency.exponentialRampToValueAtTime(140, now + DURATION);
+
+        whiteNoise.connect(filter);
+        filter.connect(curtainSoundMasterGain);
+        whiteNoise.start(now);
+        whiteNoise.stop(now + DURATION);
+
+        // B. Chuỗi chuông gió thiên nhiên sương sớm ngân lên thanh thoát khi mây dạt sang 2 bên
+        const notes = [440.0, 554.37, 659.25, 880.0, 1108.73, 1318.51]; // A4, C#5, E5, A5, C#6, E6
+        notes.forEach((freq, idx) => {
+          const osc = ctx.createOscillator();
+          const oscGain = ctx.createGain();
+          const noteStart = now + idx * 0.35;
+          const noteEnd = Math.min(noteStart + 0.95, now + DURATION);
+
+          osc.type = "sine";
+          osc.frequency.setValueAtTime(freq, noteStart);
+
+          oscGain.gain.setValueAtTime(0.0001, noteStart);
+          oscGain.gain.linearRampToValueAtTime(0.0495, noteStart + 0.08);
+          oscGain.gain.exponentialRampToValueAtTime(0.00001, noteEnd);
+
+          osc.connect(oscGain);
+          oscGain.connect(curtainSoundMasterGain);
+          osc.start(noteStart);
+          osc.stop(noteEnd);
+        });
+      }
+
+      // Ngắt êm âm thanh mở mây ngay khi mây thoát hết
+      function stopCloudCurtainSoundNow() {
+        try {
+          if (curtainSoundMasterGain && audioCtx) {
+            const now = audioCtx.currentTime;
+            curtainSoundMasterGain.gain.cancelScheduledValues(now);
+            curtainSoundMasterGain.gain.linearRampToValueAtTime(
+              0.00001,
+              now + 0.08,
+            );
+          }
+          isCurtainSoundActive = false;
+          const hintBtn = document.getElementById("soundUnlockHint");
+          if (hintBtn) hintBtn.classList.add("hidden");
+        } catch (e) {}
+      }
+
+      // Ngắt êm âm thanh mở mây ngay khi mây thoát hết
+      function stopCloudCurtainSoundNow() {
+        try {
+          if (curtainSoundMasterGain && audioCtx) {
+            const now = audioCtx.currentTime;
+            curtainSoundMasterGain.gain.cancelScheduledValues(now);
+            curtainSoundMasterGain.gain.linearRampToValueAtTime(
+              0.00001,
+              now + 0.08,
+            );
+          }
+          isCurtainSoundActive = false;
+        } catch (e) {}
+      }
+
+      // 1.1 Tiếng gió thổi nhẹ 3 giây định kỳ (Mỗi chu kỳ 30 giây) - CHILL, THƯ THÁI, ÊM ĐỀM NHƯ LOFI
+      function playGentleWindBreezeSound() {
+        try {
+          const ctx = getAudioContext();
+          if (!ctx) return;
+          const now = ctx.currentTime;
+          const DURATION = 3.0; // Đúng 3 giây
+
+          // A. Luồng gió thu siêu mềm (Brownian Noise mềm sâu, không chói rít)
+          const bufferSize = Math.floor(ctx.sampleRate * DURATION);
+          const noiseBuffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+          const output = noiseBuffer.getChannelData(0);
+          let lastOut = 0.0;
+          for (let i = 0; i < bufferSize; i++) {
+            const white = Math.random() * 2 - 1;
+            lastOut = (lastOut + 0.03 * white) / 1.03;
+            output[i] = lastOut * 3.0;
+          }
+
+          const noiseSource = ctx.createBufferSource();
+          noiseSource.buffer = noiseBuffer;
+
+          const lowFilter = ctx.createBiquadFilter();
+          lowFilter.type = "lowpass";
+          lowFilter.Q.value = 0.5;
+          lowFilter.frequency.setValueAtTime(120, now);
+          lowFilter.frequency.exponentialRampToValueAtTime(320, now + 1.5);
+          lowFilter.frequency.exponentialRampToValueAtTime(110, now + DURATION);
+
+          const mainGain = ctx.createGain();
+          mainGain.gain.setValueAtTime(0.00001, now);
+          mainGain.gain.linearRampToValueAtTime(0.042, now + 1.5);
+          mainGain.gain.exponentialRampToValueAtTime(0.00001, now + DURATION);
+
+          noiseSource.connect(lowFilter);
+          lowFilter.connect(mainGain);
+          mainGain.connect(ctx.destination);
+          noiseSource.start(now);
+          noiseSource.stop(now + DURATION);
+
+          // B. Hợp âm Ambient Lofi thư giãn cực chill (D Maj9 / F# - A - C#) ngân êm đềm
+          const chillChords = [293.66, 369.99, 440.0, 554.37]; // D4, F#4, A4, C#5
+          chillChords.forEach((freq, idx) => {
+            const ambientOsc = ctx.createOscillator();
+            const ambientGain = ctx.createGain();
+            ambientOsc.type = "sine";
+            ambientOsc.frequency.setValueAtTime(freq, now);
+
+            ambientGain.gain.setValueAtTime(0.00001, now);
+            ambientGain.gain.linearRampToValueAtTime(0.015, now + 1.3);
+            ambientGain.gain.exponentialRampToValueAtTime(
+              0.00001,
+              now + DURATION,
+            );
+
+            ambientOsc.connect(ambientGain);
+            ambientGain.connect(ctx.destination);
+            ambientOsc.start(now);
+            ambientOsc.stop(now + DURATION);
+          });
+        } catch (e) {}
+      }
+
+      // 2. Tiếng mây dải lụa tiên cảnh chuyển cảnh sau khi điền tên (Ethereal Ambient Silk Sweep)
+      function playSilkCloudTransitionSound() {
+        try {
+          const ctx = getAudioContext();
+          if (!ctx) return;
+          const now = ctx.currentTime;
+
+          // Tiếng mây lụa quét sâu lắng và êm ả
+          const bufferSize = ctx.sampleRate * 3.8;
+          const noiseBuffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+          const output = noiseBuffer.getChannelData(0);
+          for (let i = 0; i < bufferSize; i++) {
+            output[i] = Math.random() * 2 - 1;
+          }
+
+          const noise = ctx.createBufferSource();
+          noise.buffer = noiseBuffer;
+
+          const filter = ctx.createBiquadFilter();
+          filter.type = "bandpass";
+          filter.Q.value = 1.4;
+          filter.frequency.setValueAtTime(260, now);
+          filter.frequency.exponentialRampToValueAtTime(950, now + 1.8);
+          filter.frequency.exponentialRampToValueAtTime(200, now + 3.7);
+
+          const gain = ctx.createGain();
+          gain.gain.setValueAtTime(0.001, now);
+          gain.gain.linearRampToValueAtTime(0.15, now + 1.2);
+          gain.gain.exponentialRampToValueAtTime(0.001, now + 3.7);
+
+          noise.connect(filter);
+          filter.connect(gain);
+          gain.connect(ctx.destination);
+          noise.start(now);
+
+          // Hợp âm tiên cảnh F Maj9 nở rộ
+          const fairyChords = [349.23, 440.0, 523.25, 659.25, 880.0];
+          fairyChords.forEach((freq, idx) => {
+            const osc = ctx.createOscillator();
+            const oscGain = ctx.createGain();
+            osc.type = "triangle";
+            osc.frequency.setValueAtTime(freq, now + 0.6 + idx * 0.18);
+
+            oscGain.gain.setValueAtTime(0.001, now + 0.6 + idx * 0.18);
+            oscGain.gain.linearRampToValueAtTime(
+              0.035,
+              now + 0.6 + idx * 0.18 + 0.15,
+            );
+            oscGain.gain.exponentialRampToValueAtTime(
+              0.0001,
+              now + 0.6 + idx * 0.18 + 1.8,
+            );
+
+            osc.connect(oscGain);
+            oscGain.connect(ctx.destination);
+            osc.start(now + 0.6 + idx * 0.18);
+            osc.stop(now + 0.6 + idx * 0.18 + 1.9);
+          });
+        } catch (e) {}
+      }
+
+      // 3. Tiếng ấn nút thả tim / yêu thích (Heart Pop Chord)
+      function playHeartSound() {
+        try {
+          const ctx = getAudioContext();
+          if (!ctx) return;
+          const now = ctx.currentTime;
+          [587.33, 880.0, 1174.66].forEach((freq, i) => {
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.type = "sine";
+            osc.frequency.setValueAtTime(freq, now + i * 0.05);
+
+            gain.gain.setValueAtTime(0.08, now + i * 0.05);
+            gain.gain.exponentialRampToValueAtTime(
+              0.0001,
+              now + i * 0.05 + 0.35,
+            );
+
+            osc.connect(gain);
+            gain.connect(ctx.destination);
+            osc.start(now + i * 0.05);
+            osc.stop(now + i * 0.05 + 0.36);
+          });
+        } catch (e) {}
+      }
+
+      // 4. Tiếng nút xáo trộn album (Card Shuffle Swoosh Chime)
+      function playShuffleSound() {
+        try {
+          const ctx = getAudioContext();
+          if (!ctx) return;
+          const now = ctx.currentTime;
+          const notes = [440.0, 554.37, 659.25, 830.61, 987.77];
+          notes.forEach((freq, idx) => {
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.type = "sine";
+            osc.frequency.setValueAtTime(freq, now + idx * 0.04);
+            gain.gain.setValueAtTime(0.06, now + idx * 0.04);
+            gain.gain.exponentialRampToValueAtTime(
+              0.0001,
+              now + idx * 0.04 + 0.22,
+            );
+            osc.connect(gain);
+            gain.connect(ctx.destination);
+            osc.start(now + idx * 0.04);
+            osc.stop(now + idx * 0.04 + 0.23);
+          });
+        } catch (e) {}
+      }
+
+      // 5. Tiếng gửi bình luận (Bubble Message Chime)
+      function playCommentSound() {
+        try {
+          const ctx = getAudioContext();
+          if (!ctx) return;
+          const now = ctx.currentTime;
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          osc.type = "sine";
+          osc.frequency.setValueAtTime(440, now);
+          osc.frequency.exponentialRampToValueAtTime(880, now + 0.12);
+
+          gain.gain.setValueAtTime(0.08, now);
+          gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.28);
+
+          osc.connect(gain);
+          gain.connect(ctx.destination);
+          osc.start(now);
+          osc.stop(now + 0.29);
+        } catch (e) {}
+      }
+
+      // 6. Tiếng mở phong thư lưu bút (Vintage Letter Shimmer)
+      function playLetterOpenSound() {
+        try {
+          const ctx = getAudioContext();
+          if (!ctx) return;
+          const now = ctx.currentTime;
+          const arpeggio = [329.63, 415.3, 493.88, 659.25, 830.61]; // E major harp
+          arpeggio.forEach((freq, idx) => {
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.type = "triangle";
+            osc.frequency.setValueAtTime(freq, now + idx * 0.08);
+
+            gain.gain.setValueAtTime(0.07, now + idx * 0.08);
+            gain.gain.exponentialRampToValueAtTime(
+              0.0001,
+              now + idx * 0.08 + 0.65,
+            );
+
+            osc.connect(gain);
+            gain.connect(ctx.destination);
+            osc.start(now + idx * 0.08);
+            osc.stop(now + idx * 0.08 + 0.7);
+          });
+        } catch (e) {}
+      }
+
+      // 7. Tiếng nhấp nút nhẹ nhàng (Soft Glass Click)
+      function playClickSound() {
+        try {
+          const ctx = getAudioContext();
+          if (!ctx) return;
+          const now = ctx.currentTime;
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          osc.type = "sine";
+          osc.frequency.setValueAtTime(987.77, now);
+          osc.frequency.exponentialRampToValueAtTime(493.88, now + 0.06);
+
+          gain.gain.setValueAtTime(0.05, now);
+          gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.07);
+
+          osc.connect(gain);
+          gain.connect(ctx.destination);
+          osc.start(now);
+          osc.stop(now + 0.08);
+        } catch (e) {}
+      }
+
+      // 8. Tiếng phóng pháo hoa vút lên êm ái (Gentle Firework Launch Whistle)
+      function playFireworkLaunchSound() {
+        try {
+          const ctx = getAudioContext();
+          if (!ctx) return;
+          const now = ctx.currentTime;
+
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          osc.type = "sine";
+          // Âm thanh vút nhẹ từ trầm lên cao
+          osc.frequency.setValueAtTime(260 + Math.random() * 50, now);
+          osc.frequency.exponentialRampToValueAtTime(
+            860 + Math.random() * 100,
+            now + 0.38,
+          );
+
+          // Âm lượng vừa phải, thanh thoát
+          gain.gain.setValueAtTime(0.0001, now);
+          gain.gain.linearRampToValueAtTime(0.035, now + 0.1);
+          gain.gain.exponentialRampToValueAtTime(0.00001, now + 0.42);
+
+          osc.connect(gain);
+          gain.connect(ctx.destination);
+          osc.start(now);
+          osc.stop(now + 0.43);
+        } catch (e) {}
+      }
+
+      // 9. Tiếng pháo hoa nổ RÕ RÀNG, CHUẨN TIẾNG NỔ THẬT, KHÔNG CÒN TIẾNG LÁCH TÁCH
+      function playFireworkExplosionSound() {
+        try {
+          const ctx = getAudioContext();
+          if (!ctx) return;
+          const now = ctx.currentTime;
+
+          // A. Tiếng đập nổ (Shockwave Thump) đanh chắc, rõ ràng trên không trung
+          const thumpOsc = ctx.createOscillator();
+          const thumpGain = ctx.createGain();
+          thumpOsc.type = "triangle";
+          thumpOsc.frequency.setValueAtTime(175 + Math.random() * 25, now);
+          thumpOsc.frequency.exponentialRampToValueAtTime(36, now + 0.22);
+
+          thumpGain.gain.setValueAtTime(0.18, now);
+          thumpGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.36);
+
+          thumpOsc.connect(thumpGain);
+          thumpGain.connect(ctx.destination);
+          thumpOsc.start(now);
+          thumpOsc.stop(now + 0.38);
+
+          // B. Tiếng nổ bung xòe rền vang của quả pháo hoa (Authentic Detonation Boom)
+          const bufferSize = Math.floor(ctx.sampleRate * 0.75);
+          const noiseBuffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+          const output = noiseBuffer.getChannelData(0);
+          for (let i = 0; i < bufferSize; i++) {
+            output[i] = Math.random() * 2 - 1;
+          }
+
+          const noiseSource = ctx.createBufferSource();
+          noiseSource.buffer = noiseBuffer;
+
+          // Bộ lọc thông dải bandpass tạo tiếng nổ vang tự nhiên, ấm và đanh gọn
+          const bandFilter = ctx.createBiquadFilter();
+          bandFilter.type = "bandpass";
+          bandFilter.Q.value = 1.35;
+          bandFilter.frequency.setValueAtTime(420, now);
+          bandFilter.frequency.exponentialRampToValueAtTime(85, now + 0.65);
+
+          const noiseGain = ctx.createGain();
+          noiseGain.gain.setValueAtTime(0.0001, now);
+          noiseGain.gain.linearRampToValueAtTime(0.16, now + 0.015);
+          noiseGain.gain.exponentialRampToValueAtTime(0.00001, now + 0.72);
+
+          noiseSource.connect(bandFilter);
+          bandFilter.connect(noiseGain);
+          noiseGain.connect(ctx.destination);
+          noiseSource.start(now);
+          noiseSource.stop(now + 0.75);
+
+          // C. Tiếng rền âm trầm vọng trong không gian bầu trời đêm (Sub Rumble Tail)
+          const rumbleOsc = ctx.createOscillator();
+          const rumbleGain = ctx.createGain();
+          rumbleOsc.type = "sine";
+          rumbleOsc.frequency.setValueAtTime(55, now);
+          rumbleOsc.frequency.exponentialRampToValueAtTime(32, now + 0.55);
+
+          rumbleGain.gain.setValueAtTime(0.0001, now);
+          rumbleGain.gain.linearRampToValueAtTime(0.07, now + 0.05);
+          rumbleGain.gain.exponentialRampToValueAtTime(0.00001, now + 0.6);
+
+          rumbleOsc.connect(rumbleGain);
+          rumbleGain.connect(ctx.destination);
+          rumbleOsc.start(now);
+          rumbleOsc.stop(now + 0.62);
+        } catch (e) {}
+      }
+
       const FRAME_CLASSES = [
         {
           name: "Polaroid Cổ Điển",
@@ -1197,6 +1709,181 @@
         return photos;
       }
 
+      /* ========================================================
+       THUẬT TOÁN ĐẢO ẢNH THÔNG MINH - KHÔNG ĐỂ ẢNH TRÙNG TÊN ĐỨNG CẠNH NHAU
+       ======================================================== */
+      const GENERIC_NAME_STOPWORDS = new Set([
+        "kỷ",
+        "niệm",
+        "khoảnh",
+        "khắc",
+        "ảnh",
+        "anh",
+        "tc",
+        "ktđn",
+        "k64",
+        "photo",
+        "image",
+        "img",
+        "pic",
+        "chụp",
+        "tập",
+        "thể",
+        "bạn",
+        "lớp",
+        "dsc",
+        "camera",
+        "screenshot",
+        "zalo",
+      ]);
+
+      function extractPhotoGroupKey(photo) {
+        if (!photo) return "";
+        let name = (photo.photoName || photo.title || "").trim();
+        // Bỏ số thứ tự đầu tiên (ví dụ: "1. ", "02 - ", "12_")
+        name = name.replace(/^[\d\s._-]+/, "");
+        // Bỏ phần số hoặc ký hiệu ở cuối (ví dụ: " 1", " (2)", "_03", "- 4")
+        name = name.replace(/[\s._-]*\(?\d+\)?[\s._-]*$/g, "");
+        // Nhận diện mã chữ + số (ví dụ: "A111", "B222", "J101010" -> "a", "b", "j")
+        const codeMatch = name.match(/^([A-Za-z\u00C0-\u1EF9]+)\d+$/);
+        if (codeMatch) {
+          name = codeMatch[1];
+        }
+        name = name.trim().toLowerCase();
+        if (!name) name = (photo.photoName || "").trim().toLowerCase();
+        return name;
+      }
+
+      function getDistinctiveTokens(photo) {
+        const name = (photo.photoName || photo.title || "").toLowerCase();
+        const clean = name.replace(/[\d().,_-]/g, " ");
+        return clean
+          .split(/\s+/)
+          .filter((w) => w.length >= 2 && !GENERIC_NAME_STOPWORDS.has(w));
+      }
+
+      function shareCommonNamePart(photoA, photoB) {
+        if (!photoA || !photoB) return false;
+        const keyA = extractPhotoGroupKey(photoA);
+        const keyB = extractPhotoGroupKey(photoB);
+
+        // Trùng khớp nhóm tên cốt lõi
+        if (
+          keyA &&
+          keyB &&
+          keyA === keyB &&
+          !GENERIC_NAME_STOPWORDS.has(keyA)
+        ) {
+          return true;
+        }
+
+        // Kiểm tra các từ riêng đặc trưng (ví dụ: cùng có chữ "Hương", "Linh", "Thảo", "Mai", v.v.)
+        const tokensA = getDistinctiveTokens(photoA);
+        const tokensB = getDistinctiveTokens(photoB);
+        if (tokensA.length === 0 || tokensB.length === 0) return false;
+
+        for (const t of tokensA) {
+          if (tokensB.includes(t)) return true;
+        }
+        return false;
+      }
+
+      function smartShufflePhotos(photos) {
+        if (!photos || photos.length <= 1) return photos ? [...photos] : [];
+
+        // 1. Xáo trộn ngẫu nhiên toàn diện
+        let pool = shuffleArray(photos);
+        let result = [];
+
+        // 2. Lựa chọn tuần tự các ảnh không trùng phần tên với ảnh vừa đứng trước
+        while (pool.length > 0) {
+          const last = result[result.length - 1];
+          const validIndices = [];
+
+          for (let i = 0; i < pool.length; i++) {
+            if (!last || !shareCommonNamePart(pool[i], last)) {
+              validIndices.push(i);
+            }
+          }
+
+          if (validIndices.length > 0) {
+            const chosenIdx =
+              validIndices[Math.floor(Math.random() * validIndices.length)];
+            result.push(pool[chosenIdx]);
+            pool.splice(chosenIdx, 1);
+          } else {
+            // Trường hợp các ảnh còn lại tạm thời trùng tên với ảnh cuối:
+            // Tìm một vị trí an toàn giữa mảng đã xếp để chèn vào
+            const orphan = pool.shift();
+            let inserted = false;
+            const insertPoints = Array.from(
+              { length: result.length + 1 },
+              (_, i) => i,
+            );
+            for (let i = insertPoints.length - 1; i > 0; i--) {
+              const j = Math.floor(Math.random() * (i + 1));
+              [insertPoints[i], insertPoints[j]] = [
+                insertPoints[j],
+                insertPoints[i],
+              ];
+            }
+
+            for (const idx of insertPoints) {
+              const prev = idx > 0 ? result[idx - 1] : null;
+              const next = idx < result.length ? result[idx] : null;
+              if (
+                (!prev || !shareCommonNamePart(orphan, prev)) &&
+                (!next || !shareCommonNamePart(orphan, next))
+              ) {
+                result.splice(idx, 0, orphan);
+                inserted = true;
+                break;
+              }
+            }
+
+            if (!inserted) {
+              result.push(orphan);
+            }
+          }
+        }
+
+        // 3. Quét kiểm tra lần cuối: giải quyết triệt để nếu còn cặp nào vô tình sát nhau
+        for (let pass = 0; pass < 25; pass++) {
+          let hadConflict = false;
+          for (let i = 1; i < result.length; i++) {
+            if (shareCommonNamePart(result[i], result[i - 1])) {
+              hadConflict = true;
+              let swapped = false;
+              for (let j = 0; j < result.length; j++) {
+                if (j === i || j === i - 1) continue;
+                const target = result[j];
+                const prevJ = j > 0 ? result[j - 1] : null;
+                const nextJ = j < result.length - 1 ? result[j + 1] : null;
+                const prevI = result[i - 1];
+                const nextI = i < result.length - 1 ? result[i + 1] : null;
+
+                if (
+                  (!prevI || !shareCommonNamePart(target, prevI)) &&
+                  (!nextI || !shareCommonNamePart(target, nextI)) &&
+                  (!prevJ || !shareCommonNamePart(result[i], prevJ)) &&
+                  (!nextJ || !shareCommonNamePart(result[i], nextJ))
+                ) {
+                  const temp = result[i];
+                  result[i] = result[j];
+                  result[j] = temp;
+                  swapped = true;
+                  break;
+                }
+              }
+              if (swapped) break;
+            }
+          }
+          if (!hadConflict) break;
+        }
+
+        return result;
+      }
+
       async function initializeAlbumData() {
         let loadedPhotos = await tryFetchLocalLiveServerImages();
         if (!loadedPhotos) {
@@ -1207,7 +1894,8 @@
         } else {
           allPhotos = generateDynamicFallbackPhotos(12);
         }
-        activePhotos = [...allPhotos];
+        // Tự động đảo ngẫu nhiên ngay khi vừa mở web, các ảnh chung tên không đứng cạnh nhau
+        activePhotos = smartShufflePhotos(allPhotos);
         resetAndRenderFeed();
       }
 
@@ -1443,6 +2131,7 @@
         } else {
           isCurtainAnimating = false;
           ctxCurtain.clearRect(0, 0, curtainCanvas.width, curtainCanvas.height);
+          stopCloudCurtainSoundNow(); // Đảm bảo âm thanh rèm mây biến mất đồng thời khi mây vừa thoát hết
           if (curtainOnComplete) curtainOnComplete();
         }
       }
@@ -1493,6 +2182,9 @@
           activeUserName = entered.slice(0, 30);
           if (displayUserName) displayUserName.textContent = activeUserName;
 
+          // Phát âm thanh chuyển động dải mây lụa sau khi điền tên
+          playSilkCloudTransitionSound();
+
           // Hộp điền tên chuyển động thoát lên trên mượt mà trong đúng 2 GIÂY (60-120Hz)
           if (welcomeCard) {
             welcomeCard.style.transition =
@@ -1537,6 +2229,7 @@
 
       if (changeNameBtn) {
         changeNameBtn.addEventListener("click", () => {
+          playClickSound();
           if (welcomeScreen) {
             welcomeScreen.classList.remove(
               "hidden",
@@ -1715,6 +2408,7 @@
               }
               likeBtn.classList.add("text-rosepink-600");
               if (btnText) btnText.textContent = "Đã yêu thích";
+              playHeartSound();
               spawnHeartParticles(e.clientX, e.clientY);
               showToast(`Bạn (${activeUserName}) đã yêu thích bài viết!`, "💖");
             } else {
@@ -1725,6 +2419,7 @@
               }
               likeBtn.classList.remove("text-rosepink-600");
               if (btnText) btnText.textContent = "Yêu thích";
+              playClickSound();
             }
             if (likesCountEl) likesCountEl.textContent = photo.likes;
           });
@@ -1776,6 +2471,7 @@
               if (commentInput) commentInput.value = "";
               commentsList.scrollTop = commentsList.scrollHeight;
             }
+            playCommentSound();
             showToast(`${activeUserName} đã gửi lời chúc 20/10!`, "💬");
           });
         }
@@ -1850,7 +2546,8 @@
       const shuffleBtn = document.getElementById("shuffleBtn");
       if (shuffleBtn) {
         shuffleBtn.addEventListener("click", () => {
-          activePhotos = shuffleArray(activePhotos);
+          playShuffleSound();
+          activePhotos = smartShufflePhotos(allPhotos);
           resetAndRenderFeed();
           showToast(
             `Đã xáo trộn ngẫu nhiên toàn bộ ${activePhotos.length} ảnh!`,
@@ -1892,6 +2589,7 @@
       }
 
       function sharePost(title) {
+        playClickSound();
         if (navigator.share) {
           navigator
             .share({
@@ -1912,6 +2610,7 @@
       const lightboxLikeBtn = document.getElementById("lightboxLikeBtn");
 
       function openLightboxFromCard(frameElement, caption) {
+        playClickSound();
         const cardImg = frameElement.querySelector("img");
         const actualSrc =
           cardImg && cardImg.currentSrc
@@ -1932,6 +2631,7 @@
       }
 
       function closeLightboxModal() {
+        playClickSound();
         if (lightboxModal) {
           lightboxModal.classList.add("hidden");
           lightboxModal.classList.remove("flex");
@@ -1951,6 +2651,7 @@
 
       if (lightboxLikeBtn) {
         lightboxLikeBtn.addEventListener("click", (e) => {
+          playHeartSound();
           spawnHeartParticles(e.clientX, e.clientY);
           showToast(`${activeUserName} đã thả tim cho khoảnh khắc này!`, "❤️");
         });
@@ -1965,6 +2666,7 @@
       );
 
       function openLetterModal() {
+        playLetterOpenSound();
         if (letterModal && letterContainer) {
           letterModal.classList.remove("hidden");
           letterContainer.classList.add("letter-modal-active");
@@ -1975,6 +2677,7 @@
       }
 
       function closeLetterModal() {
+        playClickSound();
         if (letterContainer)
           letterContainer.classList.remove("letter-modal-active");
         if (letterModal) letterModal.classList.add("hidden");
@@ -2383,6 +3086,7 @@
       const activeSparks = [];
 
       function explodeFirework(x, y, baseColor) {
+        playFireworkExplosionSound(); // Phát âm thanh pháo hoa nổ bung êm ái
         const sparkColors = [
           baseColor,
           "#ffffff",
@@ -2398,6 +3102,7 @@
       }
 
       function launchFirework() {
+        playFireworkLaunchSound(); // Phát âm thanh vút nhẹ khi phóng pháo hoa
         const targetX = Math.random() * (width * 0.7) + width * 0.15;
         const targetY = Math.random() * (height * 0.3) + height * 0.15;
         activeRockets.push(new FireworkRocket(targetX, targetY));
@@ -2623,11 +3328,11 @@
                 ? "#f43f6e"
                 : "#e11d59";
         }
-        update() {
+        update(windExtraX = 0, windExtraAngle = 0) {
           this.y += this.speedY;
-          this.x += Math.sin(this.angle) * 0.9 + this.speedX;
-          this.angle += this.spin;
-          if (this.y > height + 25) this.reset();
+          this.x += Math.sin(this.angle) * 0.9 + this.speedX + windExtraX;
+          this.angle += this.spin + windExtraAngle;
+          if (this.y > height + 25 || this.x > width + 50) this.reset();
         }
         draw() {
           ctx.save();
@@ -2673,6 +3378,180 @@
         (_, i) => new Particle(i % 2 === 0 ? "petal" : "heart"),
       );
 
+      // ========================================================
+      // HỆ THỐNG HIỆU ỨNG GIÓ CUỐN 3 GIÂY (CHU KỲ 30 GIÂY)
+      // TỐC ĐỘ CHẬM KHOAN THAI, HƯỚNG GIÓ ĐA DẠNG, ĐỒNG BỘ 100% CẢ HÌNH VÀ TIẾNG
+      // ========================================================
+      const WIND_INTERVAL_MS = 30000; // Chu kỳ 30 giây
+      const WIND_DURATION_MS = 3000; // Kéo dài đúng 3 giây
+      let lastWindTriggerTime = performance.now();
+      let isWindActive = false;
+      let windStartTime = 0;
+      let windTrails = [];
+      let windWhirlPetals = [];
+      let currentWindDirectionMode = 0; // 0: Nâng nhẹ chéo lên, 1: Võng nhẹ chéo xuống, 2: Gợn sóng thoảng ngang
+
+      function triggerWindGust(now) {
+        isWindActive = true;
+        windStartTime = now;
+        playGentleWindBreezeSound(); // Phát âm thanh gió dịu êm đồng thời
+
+        // Chọn ngẫu nhiên hướng gió đa dạng cho mỗi chu kỳ
+        currentWindDirectionMode = Math.floor(Math.random() * 3);
+
+        // Khởi tạo các dải luồng gió uốn lượn (Wind Streamlines) với tốc độ chậm hơn, khoan thai hơn
+        windTrails = [];
+        const trailCount = 6;
+        for (let i = 0; i < trailCount; i++) {
+          const startY =
+            height * (0.12 + (i / trailCount) * 0.72) +
+            (Math.random() * 30 - 15);
+          windTrails.push({
+            startX: -120 - Math.random() * 100,
+            startY: startY,
+            length: width * (0.32 + Math.random() * 0.38),
+            // Tốc độ chậm lại một chút để gió lướt thư thả, nhẹ nhàng
+            speed: (width + 300) / 3.4,
+            thickness: Math.random() * 1.8 + 1.0,
+            waveFreq: Math.random() * 0.006 + 0.003,
+            waveAmp: Math.random() * 18 + 10,
+            tiltSlope:
+              currentWindDirectionMode === 0
+                ? -0.12
+                : currentWindDirectionMode === 1
+                  ? 0.09
+                  : 0.0,
+            phase: Math.random() * Math.PI * 2,
+            color:
+              Math.random() > 0.4
+                ? "rgba(255, 255, 255, "
+                : "rgba(254, 230, 238, ",
+          });
+        }
+
+        // Khởi tạo các cánh hoa cuốn theo luồng gió với nhịp điệu thong thả
+        windWhirlPetals = [];
+        const swirlCount = 14;
+        for (let i = 0; i < swirlCount; i++) {
+          windWhirlPetals.push({
+            x: -40 - Math.random() * 160,
+            baseY: height * (0.18 + Math.random() * 0.64),
+            speedX: (width + 300) / 3.2 + Math.random() * 40, // Tốc độ bay thong dong
+            angle: Math.random() * Math.PI * 2,
+            rotSpeed: (Math.random() - 0.5) * 0.08,
+            size: Math.random() * 6 + 7,
+            tiltSlope:
+              currentWindDirectionMode === 0
+                ? -0.12
+                : currentWindDirectionMode === 1
+                  ? 0.09
+                  : 0.0,
+            color: Math.random() > 0.5 ? "#fda4b8" : "#fb7194",
+          });
+        }
+      }
+
+      function updateAndRenderWindGust(now) {
+        if (!isWindActive) {
+          if (now - lastWindTriggerTime >= WIND_INTERVAL_MS) {
+            triggerWindGust(now);
+            lastWindTriggerTime = now;
+          }
+          return { extraWindX: 0, extraWindAngle: 0 };
+        }
+
+        const elapsed = now - windStartTime;
+        if (elapsed >= WIND_DURATION_MS) {
+          isWindActive = false;
+          return { extraWindX: 0, extraWindAngle: 0 };
+        }
+
+        // Cường độ tăng dần rồi giảm dần theo hình sin: bắt đầu 0 -> đỉnh ở giữa 1.5s -> về 0 ở 3s
+        const t = elapsed / WIND_DURATION_MS; // 0 đến 1
+        const windIntensity = Math.sin(Math.PI * t);
+        const dt = 1 / 60;
+
+        // 1. Vẽ các dải luồng gió uốn lượn đa hướng (Streamlines)
+        for (let i = 0; i < windTrails.length; i++) {
+          const trail = windTrails[i];
+          const curX = trail.startX + trail.speed * (elapsed / 1000);
+
+          ctx.save();
+          ctx.beginPath();
+          const segments = 22;
+          const step = trail.length / segments;
+
+          for (let s = 0; s <= segments; s++) {
+            const px = curX + s * step;
+            // Tính độ dốc nghiêng theo hướng gió ngẫu nhiên kết hợp sóng uốn lượn
+            const tiltY = px * trail.tiltSlope;
+            const py =
+              trail.startY +
+              tiltY +
+              Math.sin(px * trail.waveFreq + trail.phase) * trail.waveAmp;
+            if (s === 0) {
+              ctx.moveTo(px, py);
+            } else {
+              ctx.lineTo(px, py);
+            }
+          }
+
+          ctx.strokeStyle =
+            trail.color + `${(0.35 * windIntensity).toFixed(3)})`;
+          ctx.lineWidth = trail.thickness;
+          ctx.lineCap = "round";
+          ctx.shadowBlur = 8;
+          ctx.shadowColor = "rgba(255, 245, 250, 0.4)";
+          ctx.stroke();
+          ctx.restore();
+        }
+
+        // 2. Vẽ các cánh hoa bay theo hướng gió
+        for (let i = 0; i < windWhirlPetals.length; i++) {
+          const wp = windWhirlPetals[i];
+          wp.x += wp.speedX * dt;
+          const tiltOffset = wp.x * wp.tiltSlope;
+          const curY =
+            wp.baseY +
+            tiltOffset +
+            Math.sin(wp.x * 0.012 + i) * (24 * windIntensity);
+          wp.angle += wp.rotSpeed * (1 + windIntensity * 1.5);
+
+          ctx.save();
+          ctx.translate(wp.x, curY);
+          ctx.rotate(wp.angle);
+          ctx.fillStyle = wp.color;
+          ctx.globalAlpha = 0.68 * windIntensity;
+
+          ctx.beginPath();
+          ctx.moveTo(0, 0);
+          ctx.bezierCurveTo(
+            -wp.size / 2,
+            -wp.size,
+            -wp.size,
+            wp.size / 3,
+            0,
+            wp.size,
+          );
+          ctx.bezierCurveTo(wp.size, wp.size / 3, wp.size / 2, -wp.size, 0, 0);
+          ctx.fill();
+          ctx.restore();
+        }
+
+        // Lực đẩy gió truyền sang cánh hoa rơi tự do nhẹ nhàng, êm dịu
+        const slopeForce =
+          currentWindDirectionMode === 0
+            ? -0.8
+            : currentWindDirectionMode === 1
+              ? 0.6
+              : 0.0;
+        return {
+          extraWindX: windIntensity * 2.8,
+          extraWindY: windIntensity * slopeForce,
+          extraWindAngle: windIntensity * 0.04,
+        };
+      }
+
       let lastAnimTimestamp = performance.now();
 
       // Vòng lặp hoạt ảnh chính 120Hz mượt mà
@@ -2689,13 +3568,16 @@
         // 2. Cập nhật chu kỳ ngày/đêm 34s
         updateDayNightCycle();
 
-        // 3. Vẽ sao đêm
+        // 3. Cập nhật và vẽ hiệu ứng gió cuốn 3 giây (Chu kỳ 30 giây)
+        const windEffect = updateAndRenderWindGust(currentTime);
+
+        // 4. Vẽ sao đêm
         for (let i = 0; i < stars.length; i++) {
           stars[i].update();
           stars[i].draw();
         }
 
-        // 4. Pháo hoa
+        // 5. Pháo hoa
         for (let i = activeRockets.length - 1; i >= 0; i--) {
           activeRockets[i].update();
           activeRockets[i].draw();
@@ -2707,9 +3589,9 @@
           if (activeSparks[i].alpha <= 0) activeSparks.splice(i, 1);
         }
 
-        // 5. Cánh hoa & Trái tim rơi
+        // 6. Cánh hoa & Trái tim rơi (hòa quyện cùng gió cuốn)
         for (let i = 0; i < particles.length; i++) {
-          particles[i].update();
+          particles[i].update(windEffect.extraWindX, windEffect.extraWindAngle);
           particles[i].draw();
         }
 
@@ -2720,13 +3602,62 @@
         initializeAlbumData();
         requestAnimationFrame(animateParticles);
 
-        // Yêu cầu: Khi mới vào trang web, rèm mây Kiểu 1 che kín màn hình và mở sang 2 bên trong 3 giây
+        const hintBtn = document.getElementById("soundUnlockHint");
+        if (hintBtn) {
+          hintBtn.addEventListener("click", () => {
+            const ctx = getAudioContext();
+            if (ctx) {
+              ctx.resume().then(() => {
+                playCloudCurtainSound();
+              });
+            }
+          });
+        }
+
+        // Kích hoạt ngay lập tức âm thanh mở rèm mây từ thời điểm tải trang
+        playCloudCurtainSound();
+
+        // Đồng thời gắn bộ lắng nghe cực nhạy: chỉ cần chuột di chuyển, chạm nhẹ vào màn hình là unlock ngay lập tức
+        const unlockEvents = [
+          "pointerdown",
+          "touchstart",
+          "mousedown",
+          "mousemove",
+          "keydown",
+          "wheel",
+          "scroll",
+        ];
+        const onFirstInteract = () => {
+          const ctx = getAudioContext();
+          if (ctx) {
+            ctx
+              .resume()
+              .then(() => {
+                if (isCurtainAnimating && !hasCurtainSoundPlayed) {
+                  playCloudCurtainSound();
+                }
+              })
+              .catch(() => {});
+          }
+          unlockEvents.forEach((evt) =>
+            window.removeEventListener(evt, onFirstInteract),
+          );
+        };
+        unlockEvents.forEach((evt) =>
+          window.addEventListener(evt, onFirstInteract, {
+            passive: true,
+            once: true,
+          }),
+        );
+
+        // Khởi chạy chuyển động mở rèm mây Kiểu 1 trong đúng 3 giây, biến mất đồng thời cả hình ảnh và âm thanh
         startCurtainOpenAnimation(
           3000,
           "fluffy",
-          { fadeInRatio: 0 }, // Không cần fade in vì lúc đầu đã che kín màn hình
+          { fadeInRatio: 0 },
           null,
           () => {
+            stopCloudCurtainSoundNow(); // Đảm bảo âm thanh tắt hoàn toàn đúng giây thứ 3
             if (userNameInput) userNameInput.focus();
           },
         );
