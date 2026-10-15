@@ -106,15 +106,30 @@
         border: 1px solid #e2cfb4;
       }
 
+      /* Tối ưu GPU cho từng thẻ bài viết giúp cuộn mượt 60-120Hz không giật lag */
       .smooth-feed-item {
-        contain: content;
-        will-change: transform, opacity;
+        background: rgba(255, 255, 255, 0.96);
+        contain: layout style paint;
+        transform: translateZ(0);
+        backface-visibility: hidden;
       }
 
       .glass-card {
-        background: rgba(255, 255, 255, 0.92);
-        backdrop-filter: blur(12px);
-        -webkit-backdrop-filter: blur(12px);
+        background: rgba(255, 255, 255, 0.93);
+        backdrop-filter: blur(10px);
+        -webkit-backdrop-filter: blur(10px);
+      }
+
+      /* Hiệu ứng hiện ảnh mượt mà sau khi giải mã xong */
+      .feed-img-smooth {
+        opacity: 0;
+        transition:
+          opacity 0.28s ease-out,
+          transform 0.5s ease;
+        will-change: opacity;
+      }
+      .feed-img-smooth.img-loaded {
+        opacity: 1;
       }
 
       @keyframes floatUpFade {
@@ -450,12 +465,12 @@
         );
         opacity: 0;
         transition: opacity 5s cubic-bezier(0.4, 0, 0.2, 1);
+        will-change: opacity;
       }
       .night-mode .night-sky-bg {
         opacity: 1;
       }
 
-      .glass-card,
       .smooth-feed-item {
         transition:
           box-shadow 5s ease,
@@ -463,12 +478,11 @@
           background-color 5s ease;
       }
       .night-mode .smooth-feed-item {
-        background: rgba(255, 255, 255, 0.97) !important;
+        background: rgba(255, 255, 255, 0.98) !important;
         border-color: rgba(254, 163, 180, 0.85) !important;
         box-shadow:
-          0 0 30px rgba(244, 63, 110, 0.45),
-          0 0 60px rgba(236, 72, 153, 0.2),
-          0 15px 35px rgba(0, 0, 0, 0.4) !important;
+          0 0 25px rgba(244, 63, 110, 0.4),
+          0 12px 28px rgba(0, 0, 0, 0.35) !important;
       }
       #letterContainer {
         transition:
@@ -1157,21 +1171,6 @@
         } catch (e) {}
       }
 
-      // Ngắt êm âm thanh mở mây ngay khi mây thoát hết
-      function stopCloudCurtainSoundNow() {
-        try {
-          if (curtainSoundMasterGain && audioCtx) {
-            const now = audioCtx.currentTime;
-            curtainSoundMasterGain.gain.cancelScheduledValues(now);
-            curtainSoundMasterGain.gain.linearRampToValueAtTime(
-              0.00001,
-              now + 0.08,
-            );
-          }
-          isCurtainSoundActive = false;
-        } catch (e) {}
-      }
-
       // 1.1 Tiếng gió thổi nhẹ 3 giây định kỳ (Mỗi chu kỳ 30 giây) - CHILL, THƯ THÁI, ÊM ĐỀM NHƯ LOFI
       function playGentleWindBreezeSound() {
         try {
@@ -1214,7 +1213,7 @@
 
           // B. Hợp âm Ambient Lofi thư giãn cực chill (D Maj9 / F# - A - C#) ngân êm đềm
           const chillChords = [293.66, 369.99, 440.0, 554.37]; // D4, F#4, A4, C#5
-          chillChords.forEach((freq, idx) => {
+          chillChords.forEach((freq) => {
             const ambientOsc = ctx.createOscillator();
             const ambientGain = ctx.createGain();
             ambientOsc.type = "sine";
@@ -1428,14 +1427,12 @@
           const osc = ctx.createOscillator();
           const gain = ctx.createGain();
           osc.type = "sine";
-          // Âm thanh vút nhẹ từ trầm lên cao
           osc.frequency.setValueAtTime(260 + Math.random() * 50, now);
           osc.frequency.exponentialRampToValueAtTime(
             860 + Math.random() * 100,
             now + 0.38,
           );
 
-          // Âm lượng vừa phải, thanh thoát
           gain.gain.setValueAtTime(0.0001, now);
           gain.gain.linearRampToValueAtTime(0.035, now + 0.1);
           gain.gain.exponentialRampToValueAtTime(0.00001, now + 0.42);
@@ -1480,7 +1477,6 @@
           const noiseSource = ctx.createBufferSource();
           noiseSource.buffer = noiseBuffer;
 
-          // Bộ lọc thông dải bandpass tạo tiếng nổ vang tự nhiên, ấm và đanh gọn
           const bandFilter = ctx.createBiquadFilter();
           bandFilter.type = "bandpass";
           bandFilter.Q.value = 1.35;
@@ -1576,8 +1572,177 @@
       let allPhotos = [];
       let activePhotos = [];
       let currentFeedIndex = 0;
-      const CHUNK_SIZE = 6;
+      const CHUNK_SIZE = 4; // Khởi tạo nhanh gọn và mượt mà
       let activeUserName = "Bạn đọc thân thương";
+      let hasUserEnteredAlbum = false;
+
+      // ========================================================
+      // HỆ THỐNG BỘ NHỚ ĐỆM VĨNH VIỄN (PERSISTENT CACHE STORAGE)
+      // & TẢI TRƯỚC ẢNH BẰNG BĂNG THÔNG DƯ (IDLE BACKGROUND PRELOADER)
+      // ĐẢM BẢO 100% HIỆU ỨNG CHẠY MƯỢT TRƯỚC, LẦN SAU VÀO LẠI KHÔNG TỐN MB
+      // ========================================================
+      const ALBUM_CACHE_NAME = "album-20-10-k64-persistent-cache-v2";
+      const PHOTO_LIST_STORAGE_KEY = "album_20_10_k64_photo_list_v2";
+      const inMemoryBlobUrls = new Map(); // Lưu ObjectURL đã giải mã sẵn trong RAM
+      let preloadCursor = 0;
+      let activePreloadWorkers = 0;
+      const MAX_CONCURRENT_PRELOADS = 2; // Chỉ tải tối đa 2 ảnh cùng lúc ở nền để nhường băng thông cho hiệu ứng
+      let currentFrameDeltaMs = 16.6; // Theo dõi độ mượt khung hình 60Hz
+
+      // Kiểm tra xem hiệu ứng chính có đang bận hay không
+      function isAnimationSystemBusy() {
+        if (isCurtainAnimating || isCelebrationBarrageRunning) return true;
+        // Nếu khung hình vừa rồi bị trễ (> 26ms ~ dưới 38fps), tạm nhường CPU cho hiệu ứng
+        if (currentFrameDeltaMs > 26) return true;
+        return false;
+      }
+
+      // Hàm tải và lưu ảnh vào Cache Storage của máy tính/điện thoại + Giải mã trước trên GPU
+      async function fetchAndCacheSinglePhoto(photo) {
+        if (!photo) return null;
+        if (photo.resolvedCacheUrl) return photo.resolvedCacheUrl;
+
+        const candidates = photo.candidates || [photo.primaryUrl];
+        let cacheStore = null;
+        if ("caches" in window) {
+          try {
+            cacheStore = await caches.open(ALBUM_CACHE_NAME);
+          } catch (e) {}
+        }
+
+        for (let i = 0; i < candidates.length; i++) {
+          const url = candidates[i];
+          if (!url) continue;
+
+          // 1. Kiểm tra trong RAM trước
+          if (inMemoryBlobUrls.has(url)) {
+            const memUrl = inMemoryBlobUrls.get(url);
+            photo.resolvedCacheUrl = memUrl;
+            return memUrl;
+          }
+
+          try {
+            let response = null;
+            // 2. Kiểm tra trong Bộ Nhớ Đệm Vĩnh Viễn (CacheStorage của trình duyệt - Không tốn MB mạng!)
+            if (cacheStore) {
+              response = await cacheStore.match(url);
+            }
+
+            // 3. Nếu chưa có trong CacheStorage, tải với chế độ force-cache (ưu tiên bộ nhớ đệm đĩa cứng)
+            if (!response) {
+              response = await fetch(url, {
+                cache: "force-cache",
+                priority: "low",
+              });
+              if (response && response.ok && cacheStore) {
+                try {
+                  await cacheStore.put(url, response.clone());
+                } catch (cachePutErr) {}
+              }
+            }
+
+            if (response && response.ok) {
+              const blob = await response.blob();
+              if (blob && blob.size > 0) {
+                const objectUrl = URL.createObjectURL(blob);
+                inMemoryBlobUrls.set(url, objectUrl);
+
+                // Giải mã (Decode) ảnh ở luồng nền trước khi đưa lên màn hình để khi cuộn tới không bị khựng
+                const preImg = new Image();
+                preImg.decoding = "async";
+                preImg.src = objectUrl;
+                if (preImg.decode) {
+                  try {
+                    await preImg.decode();
+                  } catch (decodeErr) {}
+                }
+
+                photo.resolvedCacheUrl = objectUrl;
+                photo.primaryUrl = objectUrl;
+
+                // Nếu thẻ <img> của bức ảnh này đã có trên trang, cập nhật ngay lập tức
+                const existingImg = document.querySelector(
+                  `img[data-photo-key="${photo.photoKey}"]`,
+                );
+                if (existingImg && existingImg.src !== objectUrl) {
+                  existingImg.src = objectUrl;
+                  existingImg.classList.add("img-loaded");
+                }
+                return objectUrl;
+              }
+            }
+          } catch (err) {
+            // Tiếp tục thử candidate tiếp theo nếu có
+          }
+        }
+        return null;
+      }
+
+      // Bộ điều phối tải trước tuần tự từ trên xuống dưới bằng dung lượng/CPU còn dư
+      function scheduleBackgroundImagePreload() {
+        if (!activePhotos || activePhotos.length === 0) return;
+
+        // Nếu hiệu ứng mở rèm mây hoặc pháo hoa 3s đang chạy, đợi 400ms rồi kiểm tra lại để ưu tiên hiệu ứng 100%
+        if (isAnimationSystemBusy()) {
+          setTimeout(scheduleBackgroundImagePreload, 400);
+          return;
+        }
+
+        // Nếu người dùng đã nhập tên xong, tự động dựng trước dần các thẻ bài viết bên dưới khi rảnh
+        // để khi lướt xuống ảnh đã nằm sẵn trên trang, không cần đợi cuộn tới mới tải
+        if (
+          hasUserEnteredAlbum &&
+          currentFeedIndex < activePhotos.length &&
+          activePreloadWorkers === 0
+        ) {
+          appendIdleFeedBatch(2);
+        }
+
+        while (
+          activePreloadWorkers < MAX_CONCURRENT_PRELOADS &&
+          preloadCursor < activePhotos.length
+        ) {
+          const targetPhoto = activePhotos[preloadCursor];
+          preloadCursor++;
+
+          if (!targetPhoto || targetPhoto.resolvedCacheUrl) {
+            continue;
+          }
+
+          activePreloadWorkers++;
+          const runTask = () => {
+            if (isAnimationSystemBusy()) {
+              activePreloadWorkers--;
+              preloadCursor = Math.max(0, preloadCursor - 1);
+              setTimeout(scheduleBackgroundImagePreload, 450);
+              return;
+            }
+
+            fetchAndCacheSinglePhoto(targetPhoto).finally(() => {
+              activePreloadWorkers--;
+              if (
+                preloadCursor < activePhotos.length ||
+                currentFeedIndex < activePhotos.length
+              ) {
+                if ("requestIdleCallback" in window) {
+                  window.requestIdleCallback(
+                    () => scheduleBackgroundImagePreload(),
+                    { timeout: 600 },
+                  );
+                } else {
+                  setTimeout(scheduleBackgroundImagePreload, 90);
+                }
+              }
+            });
+          };
+
+          if ("requestIdleCallback" in window) {
+            window.requestIdleCallback(runTask, { timeout: 500 });
+          } else {
+            setTimeout(runTask, 60);
+          }
+        }
+      }
 
       function isImageFile(fileName) {
         return /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(fileName);
@@ -1599,6 +1764,7 @@
 
         return {
           id: `photo-${index}-${Math.random().toString(36).substr(2, 5)}`,
+          photoKey: `pk-${index}-${encodeURIComponent(rawName)}`,
           index: index,
           photoName: cleanTitle || `Khoảnh khắc ${index}`,
           title: cleanTitle || `Ảnh ${index}`,
@@ -1606,6 +1772,7 @@
           frameName: frameObj.name,
           frameType: frameObj.tag,
           primaryUrl: url,
+          resolvedCacheUrl: null,
           candidates: candidateList,
           caption: captionText,
           author: FIXED_AUTHOR,
@@ -1617,10 +1784,14 @@
       }
 
       async function tryFetchLocalLiveServerImages() {
+        // Trên GitHub Pages (*.github.io), bỏ qua quét thư mục Live Server để tránh tốn thời gian chờ lỗi 404
+        if (window.location.hostname.endsWith("github.io")) {
+          return null;
+        }
         const folders = ["images/", "images", "img/", "img"];
         for (const f of folders) {
           try {
-            const res = await fetch(f, { cache: "no-store" });
+            const res = await fetch(f);
             if (!res.ok) continue;
             const html = await res.text();
             const parser = new DOMParser();
@@ -1683,7 +1854,7 @@
         for (const folder of foldersToCheck) {
           try {
             const apiUrl = `https://api.github.com/repos/${repoInfo.owner}/${repoInfo.repo}/contents/${folder}`;
-            const res = await fetch(apiUrl);
+            const res = await fetch(apiUrl, { cache: "default" });
             if (!res.ok) continue;
 
             const files = await res.json();
@@ -1698,6 +1869,20 @@
                     sensitivity: "base",
                   }),
                 );
+                // Lưu danh sách tên file vào localStorage để những lần vào sau mở tức thì (0ms)
+                try {
+                  localStorage.setItem(
+                    PHOTO_LIST_STORAGE_KEY,
+                    JSON.stringify({
+                      folder,
+                      names: imageFiles.map((f) => ({
+                        name: f.name,
+                        download_url: f.download_url,
+                      })),
+                    }),
+                  );
+                } catch (e) {}
+
                 return imageFiles.map((file, idx) => {
                   const relativeUrl = folder
                     ? `${folder}/${encodeURIComponent(file.name)}`
@@ -1712,6 +1897,32 @@
             }
           } catch (e) {}
         }
+        return null;
+      }
+
+      function loadCachedGitHubPhotoList() {
+        try {
+          const raw = localStorage.getItem(PHOTO_LIST_STORAGE_KEY);
+          if (!raw) return null;
+          const parsed = JSON.parse(raw);
+          if (
+            parsed &&
+            Array.isArray(parsed.names) &&
+            parsed.names.length > 0
+          ) {
+            const folder = parsed.folder || "images";
+            return parsed.names.map((item, idx) => {
+              const relativeUrl = folder
+                ? `${folder}/${encodeURIComponent(item.name)}`
+                : encodeURIComponent(item.name);
+              const rawUrl = item.download_url || relativeUrl;
+              return createPhotoItem(idx + 1, item.name, relativeUrl, [
+                rawUrl,
+                `${folder}/${item.name}`,
+              ]);
+            });
+          }
+        } catch (e) {}
         return null;
       }
 
@@ -1767,11 +1978,8 @@
       function extractPhotoGroupKey(photo) {
         if (!photo) return "";
         let name = (photo.photoName || photo.title || "").trim();
-        // Bỏ số thứ tự đầu tiên (ví dụ: "1. ", "02 - ", "12_")
         name = name.replace(/^[\d\s._-]+/, "");
-        // Bỏ phần số hoặc ký hiệu ở cuối (ví dụ: " 1", " (2)", "_03", "- 4")
-        name = name.replace(/[\s._-]*\(?\d+\)?[\s._-]*$/g, "");
-        // Nhận diện mã chữ + số (ví dụ: "A111", "B222", "J101010" -> "a", "b", "j")
+        name = name.replace(/[\s._!-]*\(?\d*\)?[\s._!-]*$/g, "");
         const codeMatch = name.match(/^([A-Za-z\u00C0-\u1EF9]+)\d+$/);
         if (codeMatch) {
           name = codeMatch[1];
@@ -1783,7 +1991,7 @@
 
       function getDistinctiveTokens(photo) {
         const name = (photo.photoName || photo.title || "").toLowerCase();
-        const clean = name.replace(/[\d().,_-]/g, " ");
+        const clean = name.replace(/[\d().,_!-]/g, " ");
         return clean
           .split(/\s+/)
           .filter((w) => w.length >= 2 && !GENERIC_NAME_STOPWORDS.has(w));
@@ -1794,7 +2002,6 @@
         const keyA = extractPhotoGroupKey(photoA);
         const keyB = extractPhotoGroupKey(photoB);
 
-        // Trùng khớp nhóm tên cốt lõi
         if (
           keyA &&
           keyB &&
@@ -1804,7 +2011,6 @@
           return true;
         }
 
-        // Kiểm tra các từ riêng đặc trưng (ví dụ: cùng có chữ "Hương", "Linh", "Thảo", "Mai", v.v.)
         const tokensA = getDistinctiveTokens(photoA);
         const tokensB = getDistinctiveTokens(photoB);
         if (tokensA.length === 0 || tokensB.length === 0) return false;
@@ -1818,11 +2024,9 @@
       function smartShufflePhotos(photos) {
         if (!photos || photos.length <= 1) return photos ? [...photos] : [];
 
-        // 1. Xáo trộn ngẫu nhiên toàn diện
         let pool = shuffleArray(photos);
         let result = [];
 
-        // 2. Lựa chọn tuần tự các ảnh không trùng phần tên với ảnh vừa đứng trước
         while (pool.length > 0) {
           const last = result[result.length - 1];
           const validIndices = [];
@@ -1839,8 +2043,6 @@
             result.push(pool[chosenIdx]);
             pool.splice(chosenIdx, 1);
           } else {
-            // Trường hợp các ảnh còn lại tạm thời trùng tên với ảnh cuối:
-            // Tìm một vị trí an toàn giữa mảng đã xếp để chèn vào
             const orphan = pool.shift();
             let inserted = false;
             const insertPoints = Array.from(
@@ -1874,7 +2076,6 @@
           }
         }
 
-        // 3. Quét kiểm tra lần cuối: giải quyết triệt để nếu còn cặp nào vô tình sát nhau
         for (let pass = 0; pass < 25; pass++) {
           let hadConflict = false;
           for (let i = 1; i < result.length; i++) {
@@ -1912,6 +2113,23 @@
       }
 
       async function initializeAlbumData() {
+        // 1. Ưu tiên đọc danh sách ảnh từ bộ nhớ đệm nếu có để khởi tạo tức thì 0ms
+        let cachedList = loadCachedGitHubPhotoList();
+        if (cachedList && cachedList.length > 0) {
+          allPhotos = cachedList;
+          activePhotos = smartShufflePhotos(allPhotos);
+          resetAndRenderFeed();
+          // Làm mới ngầm danh sách từ GitHub nếu có ảnh mới được thêm vào repo
+          tryFetchGitHubPhotos().then((freshPhotos) => {
+            if (freshPhotos && freshPhotos.length !== allPhotos.length) {
+              allPhotos = freshPhotos;
+              activePhotos = smartShufflePhotos(allPhotos);
+              resetAndRenderFeed();
+            }
+          });
+          return;
+        }
+
         let loadedPhotos = await tryFetchLocalLiveServerImages();
         if (!loadedPhotos) {
           loadedPhotos = await tryFetchGitHubPhotos();
@@ -1921,15 +2139,12 @@
         } else {
           allPhotos = generateDynamicFallbackPhotos(12);
         }
-        // Tự động đảo ngẫu nhiên ngay khi vừa mở web, các ảnh chung tên không đứng cạnh nhau
         activePhotos = smartShufflePhotos(allPhotos);
         resetAndRenderFeed();
       }
 
       // ========================================================
       // HỆ THỐNG MÀN RÈM MÂY CHUYỂN CẢNH MƯỢT MÀ 60-120Hz (KHÔNG LAG)
-      // 2 TẠO HÌNH MÂY KHÁC NHAU: BÔNG TUYẾT KẸO BÔNG & DẢI LỤA TIÊN CẢNH
-      // CÀNG RA XA CÀNG MỜ DẦN, NỘI DUNG TỪ TỪ LỘ DIỆN
       // ========================================================
       const curtainCanvas = document.getElementById("curtainCloudCanvas");
       const ctxCurtain = curtainCanvas ? curtainCanvas.getContext("2d") : null;
@@ -1944,9 +2159,8 @@
 
       let leftCurtainPuffs = [];
       let rightCurtainPuffs = [];
-      let currentCurtainType = "fluffy"; // "fluffy" (khi mới vào) | "silk" (sau khi điền tên)
+      let currentCurtainType = "fluffy";
 
-      // Tạo cấu trúc 2 kiểu mây khác nhau hoàn toàn:
       function generateCurtainPuffs(type = "fluffy") {
         const w = window.innerWidth;
         const h = window.innerHeight;
@@ -1955,7 +2169,6 @@
         currentCurtainType = type;
 
         if (type === "fluffy") {
-          // KIỂU 1 (Khi vừa vào link): Mây bông xốp tròn bồng bềnh xếp lớp dày đặc (Cumulus Fantasy)
           const rows = 11;
           const cols = 8;
           const baseRadius = Math.max(w, h) / 7.2;
@@ -1996,7 +2209,6 @@
             }
           }
         } else {
-          // KIỂU 2 (Sau khi điền tên): Dải mây lụa tiên cảnh uốn lượn thon dài (Cirrus Silk Stratus)
           const countPerSide = 55;
           const baseLen = Math.max(w, h) / 4.4;
           const baseThick = baseLen * 0.46;
@@ -2038,11 +2250,10 @@
       let isCurtainAnimating = false;
       let curtainStartTime = 0;
       let curtainDuration = 3000;
-      let curtainFadeInRatio = 0; // Tỉ lệ thời gian đám mây xuất hiện đậm dần trước khi rẽ đôi
+      let curtainFadeInRatio = 0;
       let curtainOnProgress = null;
       let curtainOnComplete = null;
 
-      // Hàm Easing mượt mà chuẩn 60-120Hz (SmoothStep / Quad)
       function smoothEasing(t) {
         return t * t * (3 - 2 * t);
       }
@@ -2062,30 +2273,24 @@
         let partProgress = 0;
 
         if (curtainFadeInRatio > 0 && rawProgress < curtainFadeInRatio) {
-          // GIAI ĐOẠN 1: MÂY XUẤT HIỆN TỪ TỪ ĐẬM DẦN (TỪ MỜ 0% ĐẾN ĐẬM ĐẶC 100%)
           const fadeInProgress = rawProgress / curtainFadeInRatio;
           globalCloudAlpha = smoothEasing(fadeInProgress);
-          shiftX = 0; // Chưa mở sang 2 bên
+          shiftX = 0;
           partProgress = 0;
         } else {
-          // GIAI ĐOẠN 2: KHI ĐÃ ĐẬM ĐẶC MỚI BẮT ĐẦU RẼ MÂY SANG 2 BÊN VÀ MỜ DẦN RA XA
           const normalizedRaw =
             curtainFadeInRatio > 0
               ? (rawProgress - curtainFadeInRatio) / (1.0 - curtainFadeInRatio)
               : rawProgress;
           partProgress = smoothEasing(Math.min(normalizedRaw, 1.0));
 
-          // Khoảng cách dạt sang 2 bên
           shiftX = w * 0.9 * partProgress;
-          // Càng dạt ra xa càng mờ dần tan biến
           globalCloudAlpha = Math.max(0, 1.0 - Math.pow(partProgress, 1.4));
         }
 
         if (curtainOnProgress)
           curtainOnProgress(rawProgress, partProgress, globalCloudAlpha);
 
-        // VẼ TỐI ƯU SIÊU NHẸ (KHÔNG DÙNG SAVE/RESTORE LẶP LẠI GÂY LAG)
-        // 1. Cánh mây bên trái
         const leftPlateAlpha = Math.max(
           0,
           globalCloudAlpha * (1.0 - partProgress * 1.3),
@@ -2119,7 +2324,6 @@
           ctxCurtain.fill();
         }
 
-        // 2. Cánh mây bên phải
         const rightPlateAlpha = Math.max(
           0,
           globalCloudAlpha * (1.0 - partProgress * 1.3),
@@ -2158,7 +2362,7 @@
         } else {
           isCurtainAnimating = false;
           ctxCurtain.clearRect(0, 0, curtainCanvas.width, curtainCanvas.height);
-          stopCloudCurtainSoundNow(); // Đảm bảo âm thanh rèm mây biến mất đồng thời khi mây vừa thoát hết
+          stopCloudCurtainSoundNow();
           if (curtainOnComplete) curtainOnComplete();
         }
       }
@@ -2208,11 +2412,12 @@
           }
           activeUserName = entered.slice(0, 30);
           if (displayUserName) displayUserName.textContent = activeUserName;
+          hasUserEnteredAlbum = true;
 
           // Phát âm thanh chuyển động dải mây lụa sau khi điền tên
           playSilkCloudTransitionSound();
 
-          // Bắt đầu phát nhạc nền music-nen (âm lượng dịu nhẹ = 1/2 âm lượng phep-mau)
+          // Bắt đầu phát nhạc nền music-nen
           startMainBgMusic();
 
           // Hộp điền tên chuyển động thoát lên trên mượt mà trong đúng 2 GIÂY (60-120Hz)
@@ -2223,20 +2428,17 @@
             welcomeCard.style.opacity = "0";
           }
 
-          // Cho phép cuộn trang web tự nhiên
           document.body.style.overflow = "";
 
-          // Mây lụa xuất hiện tự nhiên từ mờ sang đậm đặc (trong 1.6s đầu), sau đó mới rẽ đôi sang 2 bên
           if (welcomeScreen) {
             welcomeScreen.classList.add("pointer-events-none");
           }
 
           startCurtainOpenAnimation(
-            5200, // Tổng thời gian chuyển cảnh
-            "silk", // Dải mây lụa tiên cảnh uốn lượn
-            { fadeInRatio: 0.32 }, // 32% thời gian đầu (khoảng 1.6s): mây hiện đậm dần bao phủ màn hình
-            (rawProgress, partProgress, cloudAlpha) => {
-              // Khi mây bắt đầu rẽ sang hai bên, welcomeScreen mờ dần để lộ toàn bộ website
+            5200,
+            "silk",
+            { fadeInRatio: 0.32 },
+            (rawProgress, partProgress) => {
               if (welcomeScreen) {
                 if (partProgress > 0) {
                   welcomeScreen.style.opacity = `${Math.max(0, 1.0 - partProgress * 1.4)}`;
@@ -2311,10 +2513,10 @@
       const endOfFeed = document.getElementById("endOfFeed");
       const endOfFeedMsg = document.getElementById("endOfFeedMsg");
 
-      function createPostCard(photo) {
+      function createPostCard(photo, isHighPriority = false) {
         const card = document.createElement("article");
         card.className =
-          "smooth-feed-item glass-card rounded-2xl shadow-sm border border-rosepink-200/90 overflow-hidden transition-all duration-300 hover:shadow-md";
+          "smooth-feed-item rounded-2xl shadow-sm border border-rosepink-200/90 overflow-hidden transition-all duration-300 hover:shadow-md";
 
         const photoNameBadge = `<span class="bg-rosepink-500 text-white font-sans text-[11px] font-bold px-2.5 py-0.5 rounded-md shadow-xs">${escapeHtml(photo.photoName)}</span>`;
 
@@ -2338,20 +2540,28 @@
           <p class="px-4 pb-3 text-stone-700 text-xs sm:text-sm leading-relaxed">${photo.caption}</p>
         `;
 
+        const displaySrc = photo.resolvedCacheUrl || photo.primaryUrl;
+        const priorityAttr = isHighPriority
+          ? 'fetchpriority="high"'
+          : 'fetchpriority="low"';
+
         const mediaHTML = `
           <div class="p-3 sm:p-4 bg-gradient-to-b from-stone-50/60 to-rosepink-50/30 flex justify-center items-center">
             <div class="${photo.frameClass} w-full max-w-full flex flex-col items-center justify-center transition-transform duration-300 hover:scale-[1.01] cursor-pointer" onclick="openLightboxFromCard(this, '${escapeHtml(photo.photoName)} (${photo.frameName})')">
-              <div class="w-full min-h-[280px] flex items-center justify-center bg-stone-50/50 rounded-xs relative group overflow-hidden">
+              <div class="w-full min-h-[240px] flex items-center justify-center bg-rosepink-50/40 rounded-xs relative group overflow-hidden">
                 <img 
-                  src="${photo.primaryUrl}" 
+                  src="${displaySrc}" 
                   alt="${escapeHtml(photo.photoName)}" 
-                  loading="lazy" 
+                  decoding="async"
+                  ${priorityAttr}
+                  data-photo-key="${photo.photoKey}"
                   data-cand-idx="0"
                   data-candidates='${JSON.stringify(photo.candidates)}'
+                  onload="this.classList.add('img-loaded')"
                   onerror="handleImageError(this)"
-                  class="w-full h-auto max-h-[660px] object-contain transition duration-500 group-hover:scale-[1.01]"
+                  class="feed-img-smooth ${photo.resolvedCacheUrl ? "img-loaded" : ""} w-full h-auto max-h-[660px] object-contain group-hover:scale-[1.01]"
                 >
-                <span class="absolute bottom-2 left-2 bg-black/60 backdrop-blur text-white text-[10px] px-2.5 py-0.5 rounded-full font-semibold shadow-sm">${escapeHtml(photo.photoName)}</span>
+                <span class="absolute bottom-2 left-2 bg-black/60 text-white text-[10px] px-2.5 py-0.5 rounded-full font-semibold shadow-sm">${escapeHtml(photo.photoName)}</span>
               </div>
             </div>
           </div>
@@ -2511,7 +2721,8 @@
         return card;
       }
 
-      function loadNextBatch() {
+      // Hàm dựng trước bài viết theo từng lô nhỏ lúc máy rảnh để không phải chờ cuộn xuống
+      function appendIdleFeedBatch(batchCount = 2) {
         if (currentFeedIndex >= activePhotos.length) {
           if (loadingSentinel) loadingSentinel.classList.add("hidden");
           if (endOfFeed) {
@@ -2527,17 +2738,16 @@
 
         while (
           currentFeedIndex < activePhotos.length &&
-          processed < CHUNK_SIZE
+          processed < batchCount
         ) {
           const photo = activePhotos[currentFeedIndex];
+          const isHigh = currentFeedIndex < 2;
           currentFeedIndex++;
           processed++;
-          fragment.appendChild(createPostCard(photo));
+          fragment.appendChild(createPostCard(photo, isHigh));
         }
 
-        requestAnimationFrame(() => {
-          if (feedStream) feedStream.appendChild(fragment);
-        });
+        if (feedStream) feedStream.appendChild(fragment);
 
         if (currentFeedIndex >= activePhotos.length) {
           if (loadingSentinel) loadingSentinel.classList.add("hidden");
@@ -2549,19 +2759,27 @@
         }
       }
 
+      function loadNextBatch() {
+        appendIdleFeedBatch(CHUNK_SIZE);
+        // Kích hoạt bộ tải trước ảnh thông minh trong nền
+        scheduleBackgroundImagePreload();
+      }
+
       function resetAndRenderFeed() {
         currentFeedIndex = 0;
+        preloadCursor = 0;
         if (feedStream) feedStream.innerHTML = "";
         if (endOfFeed) endOfFeed.classList.add("hidden");
         if (loadingSentinel) loadingSentinel.classList.remove("hidden");
         loadNextBatch();
       }
 
+      // Tăng rootMargin lên 1400px để nếu người dùng cuộn nhanh thì thẻ bài viết đã sẵn sàng từ xa
       const scrollObserver = new IntersectionObserver(
         (entries) => {
           if (entries[0] && entries[0].isIntersecting) loadNextBatch();
         },
-        { rootMargin: "350px" },
+        { rootMargin: "1400px" },
       );
 
       if (loadingSentinel) scrollObserver.observe(loadingSentinel);
@@ -2707,7 +2925,7 @@
         if (letterSakuraCanvas) startModalSakura(letterSakuraCanvas, "letter");
         spawnHeartParticles(window.innerWidth / 2, window.innerHeight / 2);
 
-        // Kích hoạt phát bài hát "Phép Màu" (Mounter x MAYDAYs, Minh Tốc)
+        // Kích hoạt phát bài hát "Phép Màu"
         triggerPhepMauSong();
       }
 
@@ -2798,7 +3016,6 @@
           const screenW = window.innerWidth;
           const screenH = window.innerHeight;
 
-          // Cỡ nhỏ 1/10 đến cỡ to 1/6 khung hình máy tính
           const minW = screenW / 10;
           const maxW = screenW / 6;
           this.w = minW + Math.random() * (maxW - minW);
@@ -2807,11 +3024,9 @@
           this.x = -this.w - Math.random() * 40;
           this.y = Math.random() * (screenH * 0.78) + screenH * 0.06;
 
-          // Bay hết màn hình đúng 15 giây
           const totalDistance = screenW - this.x;
           this.speedX = totalDistance / 15.0;
 
-          // Phân tầng ngẫu nhiên: dưới ảnh (bg) hoặc trên ảnh (fg)
           this.layer = Math.random() > 0.5 ? "fg" : "bg";
 
           this.puffs = [
@@ -2832,12 +3047,8 @@
         draw(ctxTarget) {
           if (!ctxTarget) return;
           ctxTarget.save();
-          // Mờ 50% để nhìn xuyên qua ảnh
           ctxTarget.globalAlpha = 0.5;
           ctxTarget.fillStyle = "#ffffff";
-          ctxTarget.shadowColor = "rgba(255, 240, 245, 0.45)";
-          ctxTarget.shadowBlur = 14;
-
           ctxTarget.beginPath();
           for (let i = 0; i < this.puffs.length; i++) {
             const p = this.puffs[i];
@@ -2853,7 +3064,6 @@
       let lastCloudFrameTime = performance.now();
 
       function spawnCloudWave() {
-        // Ngẫu nhiên 2 - 6 đám mây mỗi lần
         const waveCount = Math.floor(Math.random() * 5) + 2;
         for (let i = 0; i < waveCount; i++) {
           setTimeout(() => {
@@ -2867,7 +3077,6 @@
         const dt = Math.min((now - lastCloudFrameTime) / 1000, 0.1);
         lastCloudFrameTime = now;
 
-        // Cứ mỗi 10 giây xuất hiện một đợt mây mới
         if (now - lastCloudWaveTime >= 10000) {
           spawnCloudWave();
           lastCloudWaveTime = now;
@@ -2913,11 +3122,11 @@
         }
       }
 
-      const DAY_MS = 12000; // 12s ban ngày
-      const TRANS_NIGHT_MS = 5000; // 5s chuyển sang đêm
-      const NIGHT_MS = 12000; // 12s ban đêm
-      const TRANS_DAY_MS = 5000; // 5s chuyển lại ngày
-      const TOTAL_CYCLE_MS = DAY_MS + TRANS_NIGHT_MS + NIGHT_MS + TRANS_DAY_MS; // 34,000ms
+      const DAY_MS = 12000;
+      const TRANS_NIGHT_MS = 5000;
+      const NIGHT_MS = 12000;
+      const TRANS_DAY_MS = 5000;
+      const TOTAL_CYCLE_MS = DAY_MS + TRANS_NIGHT_MS + NIGHT_MS + TRANS_DAY_MS;
 
       let nightFactor = 0;
       const cycleStartTime = performance.now();
@@ -2928,26 +3137,22 @@
         const elapsedInCycle = (now - cycleStartTime) % TOTAL_CYCLE_MS;
 
         if (elapsedInCycle < DAY_MS) {
-          // 1. Ban ngày (12s)
           nightFactor = 0;
           for (let i = 0; i < 6; i++) fireworksTriggered[i] = false;
           if (document.body.classList.contains("night-mode")) {
             document.body.classList.remove("night-mode");
           }
         } else if (elapsedInCycle < DAY_MS + TRANS_NIGHT_MS) {
-          // 2. Chuyển sang đêm (5s mượt mà 60Hz)
           nightFactor = (elapsedInCycle - DAY_MS) / TRANS_NIGHT_MS;
           if (!document.body.classList.contains("night-mode")) {
             document.body.classList.add("night-mode");
           }
         } else if (elapsedInCycle < DAY_MS + TRANS_NIGHT_MS + NIGHT_MS) {
-          // 3. Ban đêm huyền ảo (12s)
           nightFactor = 1;
           if (!document.body.classList.contains("night-mode")) {
             document.body.classList.add("night-mode");
           }
 
-          // 6 đợt bắn pháo hoa phân bổ đều trong 12s
           const nightElapsed = elapsedInCycle - (DAY_MS + TRANS_NIGHT_MS);
           const fireworkCheckpoints = [900, 2800, 4700, 6600, 8500, 10400];
 
@@ -2964,7 +3169,6 @@
             }
           }
         } else {
-          // 4. Chuyển trở lại ban ngày (5s)
           const progress =
             (elapsedInCycle - (DAY_MS + TRANS_NIGHT_MS + NIGHT_MS)) /
             TRANS_DAY_MS;
@@ -3007,8 +3211,6 @@
           ctx.save();
           ctx.globalAlpha = currentOpacity;
           ctx.fillStyle = this.color;
-          ctx.shadowBlur = 8;
-          ctx.shadowColor = this.color;
           ctx.beginPath();
           ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
           ctx.fill();
@@ -3123,8 +3325,6 @@
           c.save();
           c.globalAlpha = this.alpha;
           c.fillStyle = this.color;
-          c.shadowBlur = 7;
-          c.shadowColor = this.color;
           c.beginPath();
           c.arc(this.x, this.y, this.size, 0, Math.PI * 2);
           c.fill();
@@ -3136,7 +3336,7 @@
       const activeSparks = [];
 
       function explodeFirework(x, y, baseColor) {
-        playFireworkExplosionSound(); // Phát âm thanh pháo hoa nổ bung êm ái
+        playFireworkExplosionSound();
         const sparkColors = [
           baseColor,
           "#ffffff",
@@ -3153,7 +3353,7 @@
       }
 
       function launchFirework() {
-        playFireworkLaunchSound(); // Phát âm thanh vút nhẹ khi phóng pháo hoa
+        playFireworkLaunchSound();
         const targetX = Math.random() * (width * 0.7) + width * 0.15;
         const targetY = Math.random() * (height * 0.3) + height * 0.15;
         activeRockets.push(new FireworkRocket(targetX, targetY));
@@ -3161,14 +3361,11 @@
 
       // ========================================================
       // HỆ THỐNG PHÁT NHẠC TỪ THƯ MỤC "music" (music/music-nen.mp3 & music/phep-mau.mp3)
-      // - music-nen.mp3: Phát sau khi nhập tên, âm lượng dịu nhẹ (đã giảm thêm 30% xuống 0.35), tự phát lại khi hết.
-      // - Khi mở bức thư phát phep-mau.mp3: Tạm dừng music-nen.mp3.
-      // - Khi phep-mau.mp3 kết thúc: Đợi 5 giây rồi phát tiếp music-nen.mp3 và lặp lại khi hết.
       // ========================================================
       const mainBgAudio = document.getElementById("mainBgAudio");
       const letterBgAudio = document.getElementById("letterBgAudio");
       const PHEP_MAU_VOLUME = 1.0;
-      const MUSIC_NEN_VOLUME = PHEP_MAU_VOLUME * 0.5 * 0.7; // Giảm tiếp 30% âm lượng hiện tại (từ 0.5 xuống 0.35)
+      const MUSIC_NEN_VOLUME = PHEP_MAU_VOLUME * 0.5 * 0.7; // 0.35
 
       let hasMusicTriggered = false;
       let isMusicCompleted = false;
@@ -3176,7 +3373,6 @@
       let isWaitingAfterPhepMau = false;
       let resumeMainBgTimer = null;
 
-      // Tự động dò tìm chính xác 2 file nhạc trong thư mục music/
       async function detectMusicFileInFolder() {
         if (mainBgAudio) {
           mainBgAudio.loop = true;
@@ -3187,8 +3383,12 @@
           letterBgAudio.volume = PHEP_MAU_VOLUME;
         }
 
+        if (window.location.hostname.endsWith("github.io")) {
+          return;
+        }
+
         try {
-          const res = await fetch("music/", { cache: "no-store" });
+          const res = await fetch("music/");
           if (res.ok) {
             const html = await res.text();
             const parser = new DOMParser();
@@ -3209,13 +3409,10 @@
               }
             }
           }
-        } catch (err) {
-          // Sử dụng đường dẫn mặc định music/music-nen.mp3 và music/phep-mau.mp3
-        }
+        } catch (err) {}
       }
       detectMusicFileInFolder();
 
-      // Hàm phát nhạc nền music-nen.mp3 (âm lượng 0.5, tự động lặp lại khi hết)
       function startMainBgMusic() {
         if (!mainBgAudio || isPhepMauPlaying || isWaitingAfterPhepMau) return;
 
@@ -3238,7 +3435,6 @@
         mainBgAudio.loop = true;
         mainBgAudio.volume = MUSIC_NEN_VOLUME;
 
-        // Đảm bảo khi hết file music-nen sẽ luôn tự động quay lại phát từ đầu
         mainBgAudio.addEventListener("ended", () => {
           if (!isPhepMauPlaying && !isWaitingAfterPhepMau) {
             mainBgAudio.currentTime = 0;
@@ -3251,8 +3447,6 @@
       if (letterBgAudio) {
         letterBgAudio.loop = false;
 
-        // Khi bài hát "phep-mau" phát đến hết giây cuối cùng:
-        // Đánh dấu hoàn tất (không bao giờ phát lại nữa), đợi đúng 5 giây rồi phát tiếp "music-nen"
         letterBgAudio.addEventListener("ended", () => {
           isMusicCompleted = true;
           hasMusicTriggered = true;
@@ -3269,13 +3463,11 @@
       }
 
       function triggerPhepMauSong() {
-        // Nếu bài hát đã bắt đầu chạy hoặc đã phát xong 1 lần thì không kích hoạt lại nữa
         if (hasMusicTriggered || isMusicCompleted || !letterBgAudio) return;
 
         hasMusicTriggered = true;
         isPhepMauPlaying = true;
 
-        // Tạm dừng ngay nhạc nền "music-nen" khi "phep-mau" bắt đầu phát
         if (mainBgAudio && !mainBgAudio.paused) {
           mainBgAudio.pause();
         }
@@ -3286,7 +3478,6 @@
         const playPromise = letterBgAudio.play();
         if (playPromise !== undefined) {
           playPromise.catch(() => {
-            // Dự phòng nếu đường dẫn chưa encode
             letterBgAudio.src = "music/phep-mau.mp3";
             letterBgAudio.volume = PHEP_MAU_VOLUME;
             letterBgAudio.play().catch(() => {
@@ -3316,7 +3507,6 @@
         const targetY = height * (0.12 + Math.random() * 0.38);
 
         const rocket = new FireworkRocket(targetX, targetY, startX, startY);
-        // Custom explosion callback on celebratory canvas: Pháo hoa khổng lồ CỠ LỚN GẤP 3 LẦN
         rocket.onExplode = (tx, ty, col) => {
           playFireworkExplosionSound();
           const sparkColors = [
@@ -3330,20 +3520,17 @@
             "#fb923c",
             "#a855f7",
           ];
-          // Tăng gấp 3 lần số lượng tia sáng (260 hạt) và vận tốc bung xòe phủ rộng gấp 3 lần
           const giantSparkCount = 260;
           for (let i = 0; i < giantSparkCount; i++) {
             const spCol =
               sparkColors[Math.floor(Math.random() * sparkColors.length)];
             const spark = new FireworkSpark(tx, ty, spCol);
 
-            // Tăng bán kính bung xòe vận tốc gấp 3 lần
             const angle = Math.random() * Math.PI * 2;
             const giantSpeed = Math.random() * 16.5 + 4.8;
             spark.vx = Math.cos(angle) * giantSpeed;
             spark.vy = Math.sin(angle) * giantSpeed;
 
-            // Kích thước hạt pháo to gấp 3 lần
             spark.size = Math.random() * 5.0 + 4.5;
 
             spark.friction = 0.968;
@@ -3362,14 +3549,13 @@
         isCelebrationBarrageRunning = true;
 
         const startTime = performance.now();
-        const BARRAGE_DURATION = 3000; // Kéo dài đúng 3 giây
+        const BARRAGE_DURATION = 3000;
         let lastWaveTime = 0;
         let toggleSide = true;
 
         function celebrationBarrageLoop(now) {
           const elapsed = now - startTime;
 
-          // Trong 3 giây: Bắn liên tiếp pháo hoa đan xen từ bên trái và bên phải
           if (elapsed < BARRAGE_DURATION) {
             if (now - lastWaveTime > 270) {
               launchSideCelebrationRocket(toggleSide ? "left" : "right");
@@ -3385,7 +3571,6 @@
             }
           }
 
-          // Vẽ trực tiếp lên curtainCanvas (z-index: 60)
           if (ctxCurtain && curtainCanvas) {
             ctxCurtain.clearRect(
               0,
@@ -3394,7 +3579,6 @@
               curtainCanvas.height,
             );
 
-            // Cập nhật & vẽ rockets
             for (let i = celebrationRockets.length - 1; i >= 0; i--) {
               const rk = celebrationRockets[i];
               rk.trail.push({ x: rk.x, y: rk.y });
@@ -3417,7 +3601,6 @@
               }
             }
 
-            // Cập nhật & vẽ sparks
             for (let i = celebrationSparks.length - 1; i >= 0; i--) {
               const sp = celebrationSparks[i];
               sp.update();
@@ -3426,7 +3609,6 @@
             }
           }
 
-          // Kiểm tra tiếp tục vòng lặp 60Hz
           if (
             elapsed < BARRAGE_DURATION ||
             celebrationRockets.length > 0 ||
@@ -3443,6 +3625,8 @@
                 curtainCanvas.height,
               );
             }
+            // Ngay khi pháo hoa mở đầu kết thúc, kích hoạt tối đa tiến trình tải trước & lưu Cache toàn bộ ảnh còn lại
+            scheduleBackgroundImagePreload();
           }
         }
 
@@ -3489,7 +3673,6 @@
         const cCtx = anim.ctx;
         cCtx.clearRect(0, 0, c.width, c.height);
 
-        // Nắng hồng ban ngày
         if (nightFactor < 0.95) {
           const radial = cCtx.createRadialGradient(
             c.width * 0.5,
@@ -3508,7 +3691,6 @@
           cCtx.fillRect(0, 0, c.width, c.height);
         }
 
-        // Vẽ sao ban đêm trên modal (đồng bộ cùng chu kỳ ngày/đêm 60Hz)
         if (nightFactor > 0.01 && anim.stars) {
           for (let s = 0; s < anim.stars.length; s++) {
             const star = anim.stars[s];
@@ -3525,8 +3707,6 @@
             cCtx.save();
             cCtx.globalAlpha = starOpacity;
             cCtx.fillStyle = star.color;
-            cCtx.shadowBlur = 8;
-            cCtx.shadowColor = star.color;
             cCtx.beginPath();
             cCtx.arc(star.x, star.y, star.size, 0, Math.PI * 2);
             cCtx.fill();
@@ -3534,7 +3714,6 @@
           }
         }
 
-        // Pháo hoa đồng bộ trên modal bức thư: vẽ trực tiếp các quả pháo và tia lửa từ chu kỳ chính
         if (key === "letter") {
           for (let i = 0; i < activeRockets.length; i++)
             activeRockets[i].draw(cCtx);
@@ -3542,7 +3721,6 @@
             activeSparks[i].draw(cCtx);
         }
 
-        // Cánh hoa anh đào rơi 60Hz
         for (let i = 0; i < anim.particles.length; i++) {
           const p = anim.particles[i];
           p.y += p.speedY;
@@ -3721,26 +3899,23 @@
 
       // ========================================================
       // HỆ THỐNG HIỆU ỨNG GIÓ CUỐN 3 GIÂY (CHU KỲ 30 GIÂY)
-      // TỐC ĐỘ CHẬM KHOAN THAI, HƯỚNG GIÓ ĐA DẠNG, ĐỒNG BỘ 100% CẢ HÌNH VÀ TIẾNG
       // ========================================================
-      const WIND_INTERVAL_MS = 30000; // Chu kỳ 30 giây
-      const WIND_DURATION_MS = 3000; // Kéo dài đúng 3 giây
+      const WIND_INTERVAL_MS = 30000;
+      const WIND_DURATION_MS = 3000;
       let lastWindTriggerTime = performance.now();
       let isWindActive = false;
       let windStartTime = 0;
       let windTrails = [];
       let windWhirlPetals = [];
-      let currentWindDirectionMode = 0; // 0: Nâng nhẹ chéo lên, 1: Võng nhẹ chéo xuống, 2: Gợn sóng thoảng ngang
+      let currentWindDirectionMode = 0;
 
       function triggerWindGust(now) {
         isWindActive = true;
         windStartTime = now;
-        playGentleWindBreezeSound(); // Phát âm thanh gió dịu êm đồng thời
+        playGentleWindBreezeSound();
 
-        // Chọn ngẫu nhiên hướng gió đa dạng cho mỗi chu kỳ
         currentWindDirectionMode = Math.floor(Math.random() * 3);
 
-        // Khởi tạo các dải luồng gió uốn lượn (Wind Streamlines) với tốc độ chậm hơn, khoan thai hơn
         windTrails = [];
         const trailCount = 6;
         for (let i = 0; i < trailCount; i++) {
@@ -3751,7 +3926,6 @@
             startX: -120 - Math.random() * 100,
             startY: startY,
             length: width * (0.32 + Math.random() * 0.38),
-            // Tốc độ chậm lại một chút để gió lướt thư thả, nhẹ nhàng
             speed: (width + 300) / 3.4,
             thickness: Math.random() * 1.8 + 1.0,
             waveFreq: Math.random() * 0.006 + 0.003,
@@ -3770,14 +3944,13 @@
           });
         }
 
-        // Khởi tạo các cánh hoa cuốn theo luồng gió với nhịp điệu thong thả
         windWhirlPetals = [];
         const swirlCount = 14;
         for (let i = 0; i < swirlCount; i++) {
           windWhirlPetals.push({
             x: -40 - Math.random() * 160,
             baseY: height * (0.18 + Math.random() * 0.64),
-            speedX: (width + 300) / 3.2 + Math.random() * 40, // Tốc độ bay thong dong
+            speedX: (width + 300) / 3.2 + Math.random() * 40,
             angle: Math.random() * Math.PI * 2,
             rotSpeed: (Math.random() - 0.5) * 0.08,
             size: Math.random() * 6 + 7,
@@ -3807,12 +3980,10 @@
           return { extraWindX: 0, extraWindAngle: 0 };
         }
 
-        // Cường độ tăng dần rồi giảm dần theo hình sin: bắt đầu 0 -> đỉnh ở giữa 1.5s -> về 0 ở 3s
-        const t = elapsed / WIND_DURATION_MS; // 0 đến 1
+        const t = elapsed / WIND_DURATION_MS;
         const windIntensity = Math.sin(Math.PI * t);
         const dt = 1 / 60;
 
-        // 1. Vẽ các dải luồng gió uốn lượn đa hướng (Streamlines)
         for (let i = 0; i < windTrails.length; i++) {
           const trail = windTrails[i];
           const curX = trail.startX + trail.speed * (elapsed / 1000);
@@ -3824,7 +3995,6 @@
 
           for (let s = 0; s <= segments; s++) {
             const px = curX + s * step;
-            // Tính độ dốc nghiêng theo hướng gió ngẫu nhiên kết hợp sóng uốn lượn
             const tiltY = px * trail.tiltSlope;
             const py =
               trail.startY +
@@ -3841,13 +4011,10 @@
             trail.color + `${(0.35 * windIntensity).toFixed(3)})`;
           ctx.lineWidth = trail.thickness;
           ctx.lineCap = "round";
-          ctx.shadowBlur = 8;
-          ctx.shadowColor = "rgba(255, 245, 250, 0.4)";
           ctx.stroke();
           ctx.restore();
         }
 
-        // 2. Vẽ các cánh hoa bay theo hướng gió
         for (let i = 0; i < windWhirlPetals.length; i++) {
           const wp = windWhirlPetals[i];
           wp.x += wp.speedX * dt;
@@ -3879,7 +4046,6 @@
           ctx.restore();
         }
 
-        // Lực đẩy gió truyền sang cánh hoa rơi tự do nhẹ nhàng, êm dịu
         const slopeForce =
           currentWindDirectionMode === 0
             ? -0.8
@@ -3895,10 +4061,11 @@
 
       let lastAnimTimestamp = performance.now();
 
-      // Vòng lặp hoạt ảnh chính 120Hz mượt mà
+      // Vòng lặp hoạt ảnh chính 60-120Hz mượt mà
       function animateParticles(nowTime) {
         const currentTime = nowTime || performance.now();
-        const dt = Math.min((currentTime - lastAnimTimestamp) / 1000, 0.05); // 120Hz mượt mà
+        const rawDeltaMs = currentTime - lastAnimTimestamp;
+        currentFrameDeltaMs = currentFrameDeltaMs * 0.85 + rawDeltaMs * 0.15;
         lastAnimTimestamp = currentTime;
 
         ctx.clearRect(0, 0, width, height);
@@ -3958,7 +4125,6 @@
         // Kích hoạt ngay lập tức âm thanh mở rèm mây từ thời điểm tải trang
         playCloudCurtainSound();
 
-        // Đồng thời gắn bộ lắng nghe cực nhạy: chỉ cần chuột di chuyển, chạm nhẹ vào màn hình là unlock ngay lập tức
         const unlockEvents = [
           "pointerdown",
           "touchstart",
@@ -3991,15 +4157,17 @@
           }),
         );
 
-        // Khởi chạy chuyển động mở rèm mây Kiểu 1 trong đúng 3 giây, biến mất đồng thời cả hình ảnh và âm thanh
+        // Khởi chạy chuyển động mở rèm mây Kiểu 1 trong đúng 3 giây
         startCurtainOpenAnimation(
           3000,
           "fluffy",
           { fadeInRatio: 0 },
           null,
           () => {
-            stopCloudCurtainSoundNow(); // Đảm bảo âm thanh tắt hoàn toàn đúng giây thứ 3
+            stopCloudCurtainSoundNow();
             if (userNameInput) userNameInput.focus();
+            // Ngay khi rèm mây đầu tiên vừa mở xong, tranh thủ tải trước nhẹ nhàng các bức ảnh đầu tiên
+            scheduleBackgroundImagePreload();
           },
         );
       });
