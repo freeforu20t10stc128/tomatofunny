@@ -726,6 +726,33 @@
       style="z-index: 25"
     ></canvas>
 
+    <!-- Trình phát âm thanh ẩn hoàn toàn (Nhạc nền lướt web & Nhạc bức thư từ thư mục music) -->
+    <audio
+      id="mainBgAudio"
+      src="music/music-nen.mp3"
+      preload="auto"
+      loop
+      style="
+        display: none;
+        width: 0;
+        height: 0;
+        opacity: 0;
+        pointer-events: none;
+      "
+    ></audio>
+    <audio
+      id="letterBgAudio"
+      src="music/phep-mau.mp3"
+      preload="auto"
+      style="
+        display: none;
+        width: 0;
+        height: 0;
+        opacity: 0;
+        pointer-events: none;
+      "
+    ></audio>
+
     <main
       class="max-w-xl mx-auto px-3 sm:px-4 mt-6 relative"
       style="z-index: 10"
@@ -2185,6 +2212,9 @@
           // Phát âm thanh chuyển động dải mây lụa sau khi điền tên
           playSilkCloudTransitionSound();
 
+          // Bắt đầu phát nhạc nền music-nen (âm lượng dịu nhẹ = 1/2 âm lượng phep-mau)
+          startMainBgMusic();
+
           // Hộp điền tên chuyển động thoát lên trên mượt mà trong đúng 2 GIÂY (60-120Hz)
           if (welcomeCard) {
             welcomeCard.style.transition =
@@ -2217,6 +2247,8 @@
             },
             () => {
               if (welcomeScreen) welcomeScreen.classList.add("hidden");
+              // Bắn pháo hoa rực rỡ khắp màn hình từ 2 bên ngay sau khi mây thoát hết (kéo dài 3 giây)
+              startCelebrationFireworkBarrage();
             },
           );
 
@@ -2674,6 +2706,9 @@
         document.body.style.overflow = "hidden";
         if (letterSakuraCanvas) startModalSakura(letterSakuraCanvas, "letter");
         spawnHeartParticles(window.innerWidth / 2, window.innerHeight / 2);
+
+        // Kích hoạt phát bài hát "Phép Màu" (Mounter x MAYDAYs, Minh Tốc)
+        triggerPhepMauSong();
       }
 
       function closeLetterModal() {
@@ -2995,13 +3030,23 @@
       const stars = Array.from({ length: 90 }, () => new Star());
 
       class FireworkRocket {
-        constructor(targetX, targetY) {
-          this.x = targetX + (Math.random() * 60 - 30);
-          this.y = height + 10;
+        constructor(targetX, targetY, startX, startY) {
+          this.startX =
+            startX !== undefined ? startX : targetX + (Math.random() * 60 - 30);
+          this.startY = startY !== undefined ? startY : height + 10;
+          this.x = this.startX;
+          this.y = this.startY;
           this.targetX = targetX;
           this.targetY = targetY;
-          this.speedY = -(Math.random() * 3 + 12);
-          this.speedX = (targetX - this.x) / 35;
+
+          const dx = this.targetX - this.x;
+          const dy = this.targetY - this.y;
+          const dist = Math.hypot(dx, dy);
+          const flightSteps = Math.max(18, Math.min(38, Math.floor(dist / 24)));
+          this.speedX = dx / flightSteps;
+          this.speedY = dy / flightSteps;
+          this.steps = 0;
+          this.maxSteps = flightSteps;
           this.trail = [];
           this.color = [
             "#f43f6e",
@@ -3010,7 +3055,9 @@
             "#a855f7",
             "#38bdf8",
             "#ec4899",
-          ][Math.floor(Math.random() * 6)];
+            "#fb923c",
+            "#34d399",
+          ][Math.floor(Math.random() * 8)];
           this.dead = false;
         }
         update() {
@@ -3018,8 +3065,11 @@
           if (this.trail.length > 8) this.trail.shift();
           this.x += this.speedX;
           this.y += this.speedY;
-          this.speedY += 0.16;
-          if (this.y <= this.targetY || this.speedY >= 0) {
+          this.steps++;
+          if (
+            this.steps >= this.maxSteps ||
+            (this.startY > this.targetY && this.y <= this.targetY)
+          ) {
             this.dead = true;
             explodeFirework(this.targetX, this.targetY, this.color);
           }
@@ -3032,13 +3082,13 @@
             c.globalAlpha = (i / this.trail.length) * 0.8;
             c.fillStyle = this.color;
             c.beginPath();
-            c.arc(t.x, t.y, 2, 0, Math.PI * 2);
+            c.arc(t.x, t.y, 2.5, 0, Math.PI * 2);
             c.fill();
           }
           c.globalAlpha = 1;
           c.fillStyle = "#ffffff";
           c.beginPath();
-          c.arc(this.x, this.y, 3, 0, Math.PI * 2);
+          c.arc(this.x, this.y, 3.5, 0, Math.PI * 2);
           c.fill();
           c.restore();
         }
@@ -3094,8 +3144,9 @@
           "#ff69b4",
           "#00ffff",
           "#ffb3ba",
+          "#f97316",
         ];
-        for (let i = 0; i < 80; i++) {
+        for (let i = 0; i < 85; i++) {
           const c = sparkColors[Math.floor(Math.random() * sparkColors.length)];
           activeSparks.push(new FireworkSpark(x, y, c));
         }
@@ -3106,6 +3157,296 @@
         const targetX = Math.random() * (width * 0.7) + width * 0.15;
         const targetY = Math.random() * (height * 0.3) + height * 0.15;
         activeRockets.push(new FireworkRocket(targetX, targetY));
+      }
+
+      // ========================================================
+      // HỆ THỐNG PHÁT NHẠC TỪ THƯ MỤC "music" (music/music-nen.mp3 & music/phep-mau.mp3)
+      // - music-nen.mp3: Phát sau khi nhập tên, âm lượng dịu nhẹ (đã giảm thêm 30% xuống 0.35), tự phát lại khi hết.
+      // - Khi mở bức thư phát phep-mau.mp3: Tạm dừng music-nen.mp3.
+      // - Khi phep-mau.mp3 kết thúc: Đợi 5 giây rồi phát tiếp music-nen.mp3 và lặp lại khi hết.
+      // ========================================================
+      const mainBgAudio = document.getElementById("mainBgAudio");
+      const letterBgAudio = document.getElementById("letterBgAudio");
+      const PHEP_MAU_VOLUME = 1.0;
+      const MUSIC_NEN_VOLUME = PHEP_MAU_VOLUME * 0.5 * 0.7; // Giảm tiếp 30% âm lượng hiện tại (từ 0.5 xuống 0.35)
+
+      let hasMusicTriggered = false;
+      let isMusicCompleted = false;
+      let isPhepMauPlaying = false;
+      let isWaitingAfterPhepMau = false;
+      let resumeMainBgTimer = null;
+
+      // Tự động dò tìm chính xác 2 file nhạc trong thư mục music/
+      async function detectMusicFileInFolder() {
+        if (mainBgAudio) {
+          mainBgAudio.loop = true;
+          mainBgAudio.volume = MUSIC_NEN_VOLUME;
+        }
+        if (letterBgAudio) {
+          letterBgAudio.loop = false;
+          letterBgAudio.volume = PHEP_MAU_VOLUME;
+        }
+
+        try {
+          const res = await fetch("music/", { cache: "no-store" });
+          if (res.ok) {
+            const html = await res.text();
+            const parser = new DOMParser();
+            const doc = parser.parseFromString(html, "text/html");
+            const links = Array.from(doc.querySelectorAll("a"));
+            for (const link of links) {
+              let href = link.getAttribute("href") || "";
+              href = href.split("?")[0].split("#")[0];
+              const decoded = decodeURIComponent(href);
+              const fileName = decoded.split("/").pop();
+              if (fileName && /\.(mp3|wav|ogg|m4a|aac|flac)$/i.test(fileName)) {
+                const lower = fileName.toLowerCase();
+                if (lower.includes("music-nen") && mainBgAudio) {
+                  mainBgAudio.src = "music/" + encodeURIComponent(fileName);
+                } else if (lower.includes("phep-mau") && letterBgAudio) {
+                  letterBgAudio.src = "music/" + encodeURIComponent(fileName);
+                }
+              }
+            }
+          }
+        } catch (err) {
+          // Sử dụng đường dẫn mặc định music/music-nen.mp3 và music/phep-mau.mp3
+        }
+      }
+      detectMusicFileInFolder();
+
+      // Hàm phát nhạc nền music-nen.mp3 (âm lượng 0.5, tự động lặp lại khi hết)
+      function startMainBgMusic() {
+        if (!mainBgAudio || isPhepMauPlaying || isWaitingAfterPhepMau) return;
+
+        mainBgAudio.loop = true;
+        mainBgAudio.volume = MUSIC_NEN_VOLUME;
+
+        if (mainBgAudio.paused) {
+          const playPromise = mainBgAudio.play();
+          if (playPromise !== undefined) {
+            playPromise.catch(() => {
+              mainBgAudio.src = "music/music-nen.mp3";
+              mainBgAudio.volume = MUSIC_NEN_VOLUME;
+              mainBgAudio.play().catch(() => {});
+            });
+          }
+        }
+      }
+
+      if (mainBgAudio) {
+        mainBgAudio.loop = true;
+        mainBgAudio.volume = MUSIC_NEN_VOLUME;
+
+        // Đảm bảo khi hết file music-nen sẽ luôn tự động quay lại phát từ đầu
+        mainBgAudio.addEventListener("ended", () => {
+          if (!isPhepMauPlaying && !isWaitingAfterPhepMau) {
+            mainBgAudio.currentTime = 0;
+            mainBgAudio.volume = MUSIC_NEN_VOLUME;
+            mainBgAudio.play().catch(() => {});
+          }
+        });
+      }
+
+      if (letterBgAudio) {
+        letterBgAudio.loop = false;
+
+        // Khi bài hát "phep-mau" phát đến hết giây cuối cùng:
+        // Đánh dấu hoàn tất (không bao giờ phát lại nữa), đợi đúng 5 giây rồi phát tiếp "music-nen"
+        letterBgAudio.addEventListener("ended", () => {
+          isMusicCompleted = true;
+          hasMusicTriggered = true;
+          isPhepMauPlaying = false;
+          letterBgAudio.pause();
+
+          isWaitingAfterPhepMau = true;
+          if (resumeMainBgTimer) clearTimeout(resumeMainBgTimer);
+          resumeMainBgTimer = setTimeout(() => {
+            isWaitingAfterPhepMau = false;
+            startMainBgMusic();
+          }, 5000);
+        });
+      }
+
+      function triggerPhepMauSong() {
+        // Nếu bài hát đã bắt đầu chạy hoặc đã phát xong 1 lần thì không kích hoạt lại nữa
+        if (hasMusicTriggered || isMusicCompleted || !letterBgAudio) return;
+
+        hasMusicTriggered = true;
+        isPhepMauPlaying = true;
+
+        // Tạm dừng ngay nhạc nền "music-nen" khi "phep-mau" bắt đầu phát
+        if (mainBgAudio && !mainBgAudio.paused) {
+          mainBgAudio.pause();
+        }
+
+        letterBgAudio.loop = false;
+        letterBgAudio.volume = PHEP_MAU_VOLUME;
+
+        const playPromise = letterBgAudio.play();
+        if (playPromise !== undefined) {
+          playPromise.catch(() => {
+            // Dự phòng nếu đường dẫn chưa encode
+            letterBgAudio.src = "music/phep-mau.mp3";
+            letterBgAudio.volume = PHEP_MAU_VOLUME;
+            letterBgAudio.play().catch(() => {
+              hasMusicTriggered = false;
+              isPhepMauPlaying = false;
+              startMainBgMusic();
+            });
+          });
+        }
+      }
+
+      // ========================================================
+      // HỆ THỐNG PHÁO HOA ĂN MỪNG MỞ ĐẦU (CỠ LỚN GẤP 3 LẦN - 60HZ)
+      // ========================================================
+      const celebrationRockets = [];
+      const celebrationSparks = [];
+      let isCelebrationBarrageRunning = false;
+
+      function launchSideCelebrationRocket(fromSide = "left") {
+        playFireworkLaunchSound();
+        const startX = fromSide === "left" ? -20 : width + 20;
+        const startY = height * (0.55 + Math.random() * 0.35);
+        const targetX =
+          fromSide === "left"
+            ? width * (0.2 + Math.random() * 0.45)
+            : width * (0.35 + Math.random() * 0.45);
+        const targetY = height * (0.12 + Math.random() * 0.38);
+
+        const rocket = new FireworkRocket(targetX, targetY, startX, startY);
+        // Custom explosion callback on celebratory canvas: Pháo hoa khổng lồ CỠ LỚN GẤP 3 LẦN
+        rocket.onExplode = (tx, ty, col) => {
+          playFireworkExplosionSound();
+          const sparkColors = [
+            col,
+            "#ffffff",
+            "#ffd700",
+            "#ff69b4",
+            "#38bdf8",
+            "#ffedd5",
+            "#f43f6e",
+            "#fb923c",
+            "#a855f7",
+          ];
+          // Tăng gấp 3 lần số lượng tia sáng (260 hạt) và vận tốc bung xòe phủ rộng gấp 3 lần
+          const giantSparkCount = 260;
+          for (let i = 0; i < giantSparkCount; i++) {
+            const spCol =
+              sparkColors[Math.floor(Math.random() * sparkColors.length)];
+            const spark = new FireworkSpark(tx, ty, spCol);
+
+            // Tăng bán kính bung xòe vận tốc gấp 3 lần
+            const angle = Math.random() * Math.PI * 2;
+            const giantSpeed = Math.random() * 16.5 + 4.8;
+            spark.vx = Math.cos(angle) * giantSpeed;
+            spark.vy = Math.sin(angle) * giantSpeed;
+
+            // Kích thước hạt pháo to gấp 3 lần
+            spark.size = Math.random() * 5.0 + 4.5;
+
+            spark.friction = 0.968;
+            spark.gravity = 0.095;
+            spark.decay = Math.random() * 0.01 + 0.007;
+
+            celebrationSparks.push(spark);
+          }
+        };
+
+        celebrationRockets.push(rocket);
+      }
+
+      function startCelebrationFireworkBarrage() {
+        if (isCelebrationBarrageRunning) return;
+        isCelebrationBarrageRunning = true;
+
+        const startTime = performance.now();
+        const BARRAGE_DURATION = 3000; // Kéo dài đúng 3 giây
+        let lastWaveTime = 0;
+        let toggleSide = true;
+
+        function celebrationBarrageLoop(now) {
+          const elapsed = now - startTime;
+
+          // Trong 3 giây: Bắn liên tiếp pháo hoa đan xen từ bên trái và bên phải
+          if (elapsed < BARRAGE_DURATION) {
+            if (now - lastWaveTime > 270) {
+              launchSideCelebrationRocket(toggleSide ? "left" : "right");
+              if (Math.random() > 0.45) {
+                setTimeout(
+                  () =>
+                    launchSideCelebrationRocket(!toggleSide ? "left" : "right"),
+                  120,
+                );
+              }
+              toggleSide = !toggleSide;
+              lastWaveTime = now;
+            }
+          }
+
+          // Vẽ trực tiếp lên curtainCanvas (z-index: 60)
+          if (ctxCurtain && curtainCanvas) {
+            ctxCurtain.clearRect(
+              0,
+              0,
+              curtainCanvas.width,
+              curtainCanvas.height,
+            );
+
+            // Cập nhật & vẽ rockets
+            for (let i = celebrationRockets.length - 1; i >= 0; i--) {
+              const rk = celebrationRockets[i];
+              rk.trail.push({ x: rk.x, y: rk.y });
+              if (rk.trail.length > 8) rk.trail.shift();
+              rk.x += rk.speedX;
+              rk.y += rk.speedY;
+              rk.steps++;
+
+              if (
+                rk.steps >= rk.maxSteps ||
+                (rk.startY > rk.targetY && rk.y <= rk.targetY)
+              ) {
+                rk.dead = true;
+                if (rk.onExplode)
+                  rk.onExplode(rk.targetX, rk.targetY, rk.color);
+                else explodeFirework(rk.targetX, rk.targetY, rk.color);
+                celebrationRockets.splice(i, 1);
+              } else {
+                rk.draw(ctxCurtain);
+              }
+            }
+
+            // Cập nhật & vẽ sparks
+            for (let i = celebrationSparks.length - 1; i >= 0; i--) {
+              const sp = celebrationSparks[i];
+              sp.update();
+              sp.draw(ctxCurtain);
+              if (sp.alpha <= 0) celebrationSparks.splice(i, 1);
+            }
+          }
+
+          // Kiểm tra tiếp tục vòng lặp 60Hz
+          if (
+            elapsed < BARRAGE_DURATION ||
+            celebrationRockets.length > 0 ||
+            celebrationSparks.length > 0
+          ) {
+            requestAnimationFrame(celebrationBarrageLoop);
+          } else {
+            isCelebrationBarrageRunning = false;
+            if (ctxCurtain && curtainCanvas) {
+              ctxCurtain.clearRect(
+                0,
+                0,
+                curtainCanvas.width,
+                curtainCanvas.height,
+              );
+            }
+          }
+        }
+
+        requestAnimationFrame(celebrationBarrageLoop);
       }
 
       const modalAnimators = {
